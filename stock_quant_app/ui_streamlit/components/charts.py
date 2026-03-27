@@ -110,13 +110,13 @@ def indicator_chart(
     if "rsi" in indicator.lower():
         fig.add_hrect(y0=70, y1=100, fillcolor="rgba(255,82,82,0.06)", line_width=0)
         fig.add_hrect(y0=0, y1=30, fillcolor="rgba(0,230,118,0.06)", line_width=0)
-        fig.add_hline(y=70, line_dash="dot", line_color="#FF525260", line_width=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="#00E67660", line_width=1)
-        fig.add_hline(y=50, line_dash="dot", line_color="#78909C30", line_width=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="rgba(255,82,82,0.38)", line_width=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="rgba(0,230,118,0.38)", line_width=1)
+        fig.add_hline(y=50, line_dash="dot", line_color="rgba(120,144,156,0.19)", line_width=1)
 
     # ADX reference
     if "adx" in indicator.lower():
-        fig.add_hline(y=25, line_dash="dot", line_color="#FFD74060", line_width=1,
+        fig.add_hline(y=25, line_dash="dot", line_color="rgba(255,215,64,0.38)", line_width=1,
                       annotation_text="Trend threshold", annotation_font_color="#FFD740",
                       annotation_font_size=10)
 
@@ -204,11 +204,11 @@ def prediction_vs_actual_chart(df: pd.DataFrame, height: int = 420) -> go.Figure
         x=df["pred_date"], y=df["actual_change"],
         mode="markers",
         name="Actual",
-        marker=dict(color=colors, size=6, line=dict(width=1, color="#FFFFFF20")),
+        marker=dict(color=colors, size=6, line=dict(width=1, color="rgba(255,255,255,0.13)")),
     ))
 
     # Zero line
-    fig.add_hline(y=0, line_dash="solid", line_color="#78909C30", line_width=1)
+    fig.add_hline(y=0, line_dash="solid", line_color="rgba(120,144,156,0.19)", line_width=1)
 
     fig.update_layout(
         **_LAYOUT,
