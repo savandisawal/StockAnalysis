@@ -30,6 +30,7 @@ dependencies = [
     "numpy>=1.26.0",
     "pandas_ta>=0.3.14b1",
     "yfinance>=0.2.46",
+    "jugaad-data>=0.33.0",
 
     # Scraping & parsing
     "beautifulsoup4>=4.12.0",
