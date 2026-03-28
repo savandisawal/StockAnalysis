@@ -16,6 +16,7 @@ import anthropic
 
 from app.config import settings
 from data.cache import get_json, set_json
+from data.fetch_corporate import fetch_corporate_announcements
 from data.fetch_macro import MacroSnapshot, fetch_macro_snapshot
 from data.fetch_news import NewsHeadline, fetch_news_headlines
 from utils.logger import logger
@@ -118,8 +119,9 @@ def _compute_macro_mood(features: dict[str, float | None]) -> float:
 def score_sentiment_claude(
     headlines: list[NewsHeadline],
     sector: str | None = None,
+    corporate_summary: str | None = None,
 ) -> float | None:
-    """Send headlines to Claude Haiku for sentiment scoring.
+    """Send headlines + corporate filings to Claude Haiku for sentiment scoring.
 
     Returns a score from -1 (very bearish) to +1 (very bullish).
     Returns None if API key is not configured or call fails.
@@ -128,19 +130,26 @@ def score_sentiment_claude(
         logger.warning("ANTHROPIC_API_KEY not set — skipping sentiment scoring")
         return None
 
-    if not headlines:
+    if not headlines and not corporate_summary:
         return None
 
     # Build headline text
-    headline_text = "\n".join(
-        f"- {h.title} ({h.source})" for h in headlines[:settings.sentiment_max_headlines]
-    )
+    parts = []
+    if headlines:
+        headline_text = "\n".join(
+            f"- {h.title} ({h.source})" for h in headlines[:settings.sentiment_max_headlines]
+        )
+        parts.append(f"Recent news headlines:\n{headline_text}")
 
+    if corporate_summary:
+        parts.append(f"Recent corporate announcements/filings from NSE:\n{corporate_summary}")
+
+    combined_text = "\n\n".join(parts)
     sector_context = f" related to the {sector} sector and" if sector else ""
 
     prompt = (
-        f"Given these recent news headlines{sector_context} Indian/global markets:\n\n"
-        f"{headline_text}\n\n"
+        f"Given these recent signals{sector_context} Indian/global markets:\n\n"
+        f"{combined_text}\n\n"
         f"Return ONLY a JSON object with exactly two fields:\n"
         f'  "score": a number from -1.0 (very bearish) to +1.0 (very bullish)\n'
         f'  "reason": one sentence explaining the macro sentiment\n\n'
@@ -220,10 +229,22 @@ def compute_macro_sentiment_features(
     if cached_score is not None and use_cache:
         result.news_sentiment = cached_score.get("score")
     else:
-        # Fetch headlines and score
+        # Fetch headlines and corporate announcements
         headlines = fetch_news_headlines(stock=stock, sector=sector, use_cache=use_cache)
-        if headlines:
-            score = score_sentiment_claude(headlines, sector=sector)
+
+        # Fetch corporate filings if we have a stock ticker
+        corporate_summary = None
+        if stock:
+            try:
+                filings = fetch_corporate_announcements(stock, use_cache=use_cache)
+                corporate_summary = filings.summary_for_sentiment(max_items=10)
+            except Exception as e:
+                logger.warning(f"Corporate announcements fetch failed: {e}")
+
+        if headlines or corporate_summary:
+            score = score_sentiment_claude(
+                headlines, sector=sector, corporate_summary=corporate_summary,
+            )
             result.news_sentiment = score
             if score is not None:
                 set_json(sentiment_cache_key, {"score": score})

@@ -38,6 +38,19 @@ _HISTORY_TTL = 86400 * 365 * 10
 
 inject_global_css()
 
+# Auto-select text on click for sidebar inputs (selectbox search + text input)
+st.markdown(
+    """<script>
+    const doc = window.parent.document;
+    doc.addEventListener('focusin', function(e) {
+        if (e.target.tagName === 'INPUT' && e.target.type === 'text') {
+            setTimeout(() => e.target.select(), 0);
+        }
+    });
+    </script>""",
+    unsafe_allow_html=True,
+)
+
 # ── Initialize session state (load from DB) ─────────────────────
 
 if "search_history" not in st.session_state:
@@ -183,6 +196,103 @@ if existing_models:
     except Exception as e:
         st.caption(f"Prediction unavailable: {e}")
 
+# ── Prediction Explainer ─────────────────────────────────────────
+
+if pred:
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+    section_header("Prediction Explainer")
+
+    # Signal Summary Table
+    from model.predict import get_signal_summary
+    signals = get_signal_summary(selected_ticker)
+    if signals:
+        with st.expander("Signal Summary", expanded=True):
+            sig_df = pd.DataFrame(signals)
+            # Color-code sentiment column
+            def _color_sentiment(val):
+                colors = {"Bullish": "#00E676", "Bearish": "#FF5252", "Neutral": "#FFD740"}
+                return f"color: {colors.get(val, '#C0C0C0')}"
+            styled_df = sig_df.style.applymap(_color_sentiment, subset=["sentiment"])
+            st.dataframe(
+                styled_df, use_container_width=True, hide_index=True,
+                column_config={
+                    "signal": st.column_config.TextColumn("Signal", width="medium"),
+                    "value": st.column_config.TextColumn("Value", width="small"),
+                    "interpretation": st.column_config.TextColumn("Interpretation", width="large"),
+                    "sentiment": st.column_config.TextColumn("Sentiment", width="small"),
+                },
+            )
+
+            # Sentiment summary counts
+            bull_count = sum(1 for s in signals if s["sentiment"] == "Bullish")
+            bear_count = sum(1 for s in signals if s["sentiment"] == "Bearish")
+            neut_count = sum(1 for s in signals if s["sentiment"] == "Neutral")
+            st.markdown(
+                f'<div style="display:flex;gap:16px;justify-content:center;padding:8px 0">'
+                f'<span style="color:#00E676;font-weight:600">{bull_count} Bullish</span>'
+                f'<span style="color:#FFD740;font-weight:600">{neut_count} Neutral</span>'
+                f'<span style="color:#FF5252;font-weight:600">{bear_count} Bearish</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    # Feature Importance (inline — no need to open separate expander)
+    if existing_models:
+        with st.expander("Feature Importance"):
+            try:
+                from model.model_registry import load_model_bundle
+                bundle = load_model_bundle(selected_ticker)
+                if bundle:
+                    models_loaded, feat_names, meta = bundle
+                    imp = get_feature_importance(models_loaded, feat_names, top_n=15)
+                    import plotly.express as px
+                    fig = px.bar(imp, x="importance", y="feature", orientation="h", color="importance", color_continuous_scale=["#6C63FF", "#00D4AA"])
+                    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(14,17,23,0.8)", font=dict(color="#C0C0C0"), yaxis=dict(autorange="reversed", gridcolor="#1E2028"), xaxis=dict(gridcolor="#1E2028"), coloraxis_showscale=False, height=400, margin=dict(l=120, r=20, t=20, b=20))
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception:
+                st.caption("Train a model to see feature importance.")
+
+    # Confidence Breakdown
+    with st.expander("Confidence Breakdown"):
+        st.markdown(
+            f'<div style="background:rgba(108,99,255,0.06);border:1px solid rgba(108,99,255,0.15);border-radius:12px;padding:16px">'
+            f'<div style="font-size:0.85rem;color:#C0C0C0;line-height:1.7">'
+            f'<b>Confidence: {pred.confidence}%</b><br>'
+            f'Predicted range width: <b>{pred.range_width_pct:.2f}%</b> (P10 to P90)<br>'
+            f'Direction: <b>{pred.direction}</b> (median change: {pred.predicted_change_pct:+.3f}%)<br><br>'
+            f'<span style="color:#78909C">Confidence is derived from how narrow the prediction range is '
+            f'relative to the stock\'s typical daily volatility (ATR). A narrow range means the model '
+            f'is more certain about tomorrow\'s price action.</span>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+
+# ── Corporate Actions ────────────────────────────────────────────
+
+st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+with st.expander("Corporate Actions & Filings"):
+    try:
+        from data.fetch_corporate import fetch_corporate_announcements
+        filings = fetch_corporate_announcements(selected_ticker, days=30)
+        if filings.announcements:
+            display_data = filings.to_display_list(max_items=15)
+            filings_df = pd.DataFrame(display_data)
+            st.dataframe(
+                filings_df, use_container_width=True, hide_index=True,
+                column_config={
+                    "Date": st.column_config.TextColumn("Date", width="small"),
+                    "Category": st.column_config.TextColumn("Category", width="medium"),
+                    "Subject": st.column_config.TextColumn("Subject", width=400),
+                    "Important": st.column_config.CheckboxColumn("Material", width="small"),
+                },
+            )
+            imp_count = len(filings.important_announcements())
+            st.caption(f"{filings.total_count} announcements in last 30 days ({imp_count} material)")
+        else:
+            st.caption("No corporate announcements found in the last 30 days.")
+    except Exception as e:
+        st.caption(f"Corporate filings unavailable: {e}")
+
 # ── Record search history ───────────────────────────────────────
 
 history_entry = {
@@ -223,23 +333,6 @@ try:
     st.plotly_chart(fig, use_container_width=True)
 except Exception as e:
     st.error(f"Chart rendering failed: {e}")
-
-# ── Feature Importance ───────────────────────────────────────────
-
-if existing_models:
-    with st.expander("Feature Importance"):
-        try:
-            from model.model_registry import load_model_bundle
-            bundle = load_model_bundle(selected_ticker)
-            if bundle:
-                models_loaded, feat_names, meta = bundle
-                imp = get_feature_importance(models_loaded, feat_names, top_n=15)
-                import plotly.express as px
-                fig = px.bar(imp, x="importance", y="feature", orientation="h", color="importance", color_continuous_scale=["#6C63FF", "#00D4AA"])
-                fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(14,17,23,0.8)", font=dict(color="#C0C0C0"), yaxis=dict(autorange="reversed", gridcolor="#1E2028"), xaxis=dict(gridcolor="#1E2028"), coloraxis_showscale=False, height=400, margin=dict(l=120, r=20, t=20, b=20))
-                st.plotly_chart(fig, use_container_width=True)
-        except Exception:
-            st.caption("Train a model to see feature importance.")
 
 # ── Search History ──────────────────────────────────────────────
 

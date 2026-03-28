@@ -164,6 +164,143 @@ def predict_next_day(
     return result
 
 
+def _sig(name: str, val: str, interp: str, sent: str) -> dict:
+    return {
+        "signal": name,
+        "value": val,
+        "interpretation": interp,
+        "sentiment": sent,
+    }
+
+
+def get_signal_summary(ticker: str) -> list[dict]:
+    """Generate human-readable signal summary from latest indicators.
+
+    Returns list of dicts: signal, value, interpretation, sentiment.
+    sentiment is one of "Bullish", "Bearish", "Neutral".
+    """
+    import pandas as pd
+
+    from data.fetch_ohlc import fetch_ohlc
+    from features.technicals import compute_all_technicals
+
+    df = fetch_ohlc(ticker, years=1)
+    if df.empty or len(df) < 50:
+        return []
+
+    df = compute_all_technicals(df)
+    latest = df.iloc[-1]
+    signals: list[dict] = []
+
+    # RSI
+    rsi = latest.get("rsi_14")
+    if pd.notna(rsi):
+        if rsi > 70:
+            signals.append(_sig(
+                "RSI (14)", f"{rsi:.1f}",
+                "Overbought — potential reversal down", "Bearish",
+            ))
+        elif rsi < 30:
+            signals.append(_sig(
+                "RSI (14)", f"{rsi:.1f}",
+                "Oversold — potential reversal up", "Bullish",
+            ))
+        else:
+            signals.append(_sig(
+                "RSI (14)", f"{rsi:.1f}",
+                "Neutral zone", "Neutral",
+            ))
+
+    # MACD
+    macd = latest.get("macd_hist_pct")
+    if pd.notna(macd):
+        sent = "Bullish" if macd > 0 else "Bearish"
+        label = "Bullish" if macd > 0 else "Bearish"
+        signals.append(_sig(
+            "MACD Histogram", f"{macd:+.3f}%",
+            f"{label} momentum", sent,
+        ))
+
+    # Bollinger %B
+    bb = latest.get("bb_pct_b")
+    if pd.notna(bb):
+        if bb > 0.8:
+            signals.append(_sig(
+                "Bollinger %B", f"{bb:.3f}",
+                "Near upper band — resistance", "Bearish",
+            ))
+        elif bb < 0.2:
+            signals.append(_sig(
+                "Bollinger %B", f"{bb:.3f}",
+                "Near lower band — support", "Bullish",
+            ))
+        else:
+            signals.append(_sig(
+                "Bollinger %B", f"{bb:.3f}",
+                "Mid-range", "Neutral",
+            ))
+
+    # EMA positioning
+    ema_cols = [
+        ("EMA 20", "ema_20_dist_pct"),
+        ("EMA 50", "ema_50_dist_pct"),
+        ("EMA 200", "ema_200_dist_pct"),
+    ]
+    for ema_name, col in ema_cols:
+        val = latest.get(col)
+        if pd.notna(val):
+            sent = "Bullish" if val > 0 else "Bearish"
+            pos = "Above" if val > 0 else "Below"
+            signals.append(_sig(
+                ema_name, f"{val:+.2f}%",
+                f"{pos} {ema_name}", sent,
+            ))
+
+    # ADX + Regime
+    adx = latest.get("adx_14")
+    regime = latest.get("regime")
+    if pd.notna(adx) and pd.notna(regime):
+        regime_int = int(regime)
+        label_map = {
+            1: "Trending Up", -1: "Trending Down", 0: "Sideways",
+        }
+        sent_map = {
+            1: "Bullish", -1: "Bearish", 0: "Neutral",
+        }
+        signals.append(_sig(
+            "ADX / Regime", f"{adx:.1f}",
+            f"Regime: {label_map.get(regime_int, 'Unknown')}",
+            sent_map.get(regime_int, "Neutral"),
+        ))
+
+    # Volume Z-score
+    vol_z = latest.get("volume_zscore")
+    if pd.notna(vol_z):
+        if abs(vol_z) > 2:
+            interp = "Unusual volume — breakout signal"
+        else:
+            interp = "Normal volume"
+        signals.append(_sig(
+            "Volume Z-Score", f"{vol_z:.2f}", interp, "Neutral",
+        ))
+
+    # ATR volatility
+    atr = latest.get("atr_pct")
+    if pd.notna(atr):
+        if atr > 3:
+            vol_label = "High"
+        elif atr < 1:
+            vol_label = "Low"
+        else:
+            vol_label = "Normal"
+        signals.append(_sig(
+            "ATR %", f"{atr:.2f}%",
+            f"{vol_label} volatility", "Neutral",
+        ))
+
+    return signals
+
+
 def predict_batch(
     tickers: list[str],
     include_fundamentals: bool = True,
