@@ -193,6 +193,19 @@ if existing_models:
                 prediction_range_card(pred.predicted_low, pred.predicted_mid, pred.predicted_high, pred.predicted_change_pct)
             with p_right:
                 confidence_badge(pred.confidence, pred.direction)
+
+            # Show prediction warnings/safeguards
+            if pred.has_warnings:
+                for w in pred.warnings:
+                    icon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(w.level, "")
+                    if w.level == "critical":
+                        st.error(f"{icon} {w.message}")
+                    elif w.level == "warning":
+                        st.warning(f"{icon} {w.message}")
+                    else:
+                        st.info(f"{icon} {w.message}")
+                if pred.guardrail_applied:
+                    st.caption(f"Original predicted change: {pred.original_change_pct:+.2f}% (capped by guardrail)")
     except Exception as e:
         st.caption(f"Prediction unavailable: {e}")
 
@@ -292,6 +305,102 @@ with st.expander("Corporate Actions & Filings"):
             st.caption("No corporate announcements found in the last 30 days.")
     except Exception as e:
         st.caption(f"Corporate filings unavailable: {e}")
+
+# ── Fundamentals Overview ────────────────────────────────────────
+
+st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+with st.expander("Fundamentals Overview"):
+    try:
+        from data.fetch_fundamentals import fetch_fundamentals
+        from features.fundamentals import compute_fundamental_features
+        raw = fetch_fundamentals(selected_ticker)
+        feat = compute_fundamental_features(selected_ticker)
+
+        if raw.is_valid:
+            f1, f2, f3, f4, f5 = st.columns(5)
+
+            # PE Ratio
+            with f1:
+                pe_val = f"{raw.pe_ratio:.1f}" if raw.pe_ratio else "N/A"
+                pe_sub = ""
+                if feat.pe_zscore is not None:
+                    if feat.pe_zscore > 0.5:
+                        pe_sub = "Expensive vs peers"
+                    elif feat.pe_zscore < -0.5:
+                        pe_sub = "Cheap vs peers"
+                    else:
+                        pe_sub = "Fair vs peers"
+                pe_color = COLORS["bearish"] if (feat.pe_zscore or 0) > 0.5 else COLORS["bullish"] if (feat.pe_zscore or 0) < -0.5 else COLORS["primary"]
+                metric_card("PE Ratio", pe_val, pe_sub, pe_color)
+
+            # ROE
+            with f2:
+                roe_val = f"{raw.roe:.1f}%" if raw.roe else "N/A"
+                roe_sub = ""
+                if feat.roe_percentile is not None:
+                    if feat.roe_percentile >= 0.75:
+                        roe_sub = "Top quartile"
+                    elif feat.roe_percentile >= 0.5:
+                        roe_sub = "Above median"
+                    else:
+                        roe_sub = "Below median"
+                roe_color = COLORS["bullish"] if (feat.roe_percentile or 0) >= 0.5 else COLORS["warning"]
+                metric_card("ROE", roe_val, roe_sub, roe_color)
+
+            # Debt/Equity
+            with f3:
+                de_val = f"{raw.debt_to_equity:.2f}" if raw.debt_to_equity is not None else "N/A"
+                de_sub = ""
+                if feat.de_percentile is not None:
+                    if feat.de_percentile >= 0.75:
+                        de_sub = "Low debt vs peers"
+                    elif feat.de_percentile >= 0.5:
+                        de_sub = "Moderate debt"
+                    else:
+                        de_sub = "High debt vs peers"
+                de_color = COLORS["bullish"] if (feat.de_percentile or 0) >= 0.5 else COLORS["bearish"]
+                metric_card("Debt/Equity", de_val, de_sub, de_color)
+
+            # EPS Growth
+            with f4:
+                eps_val = f"{raw.eps_cagr_3y:+.1f}%" if raw.eps_cagr_3y is not None else "N/A"
+                if raw.eps_cagr_3y is not None:
+                    eps_color = COLORS["bullish"] if raw.eps_cagr_3y > 10 else COLORS["warning"] if raw.eps_cagr_3y > 0 else COLORS["bearish"]
+                else:
+                    eps_color = COLORS["primary"]
+                metric_card("EPS CAGR 3Y", eps_val, color=eps_color)
+
+            # Promoter Holding
+            with f5:
+                prom_val = f"{raw.promoter_holding:.1f}%" if raw.promoter_holding else "N/A"
+                prom_sub = ""
+                if raw.promoter_holding_change is not None:
+                    prom_sub = f"{raw.promoter_holding_change:+.2f}% QoQ"
+                prom_color = COLORS["bullish"] if (raw.promoter_holding_change or 0) >= 0 else COLORS["bearish"]
+                metric_card("Promoter", prom_val, prom_sub, prom_color)
+
+            # Sector context
+            if raw.sector_pe and raw.pe_ratio:
+                ratio = raw.pe_ratio / raw.sector_pe
+                if ratio > 1.2:
+                    verdict = f"Trading at {ratio:.1f}x sector PE ({raw.sector_pe:.1f}) — premium valuation"
+                    v_color = COLORS["warning"]
+                elif ratio < 0.8:
+                    verdict = f"Trading at {ratio:.1f}x sector PE ({raw.sector_pe:.1f}) — discount valuation"
+                    v_color = COLORS["bullish"]
+                else:
+                    verdict = f"Trading near sector PE ({raw.sector_pe:.1f}) — fair valuation"
+                    v_color = COLORS["primary"]
+                st.markdown(
+                    f'<div style="background:{v_color}10;border-left:4px solid {v_color};'
+                    f'border-radius:0 10px 10px 0;padding:10px 16px;margin-top:12px;'
+                    f'color:{v_color};font-size:0.85rem">{verdict}</div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption(f"No fundamental data available for {selected_ticker} on Screener.in")
+    except Exception as e:
+        st.caption(f"Fundamentals unavailable: {e}")
 
 # ── Record search history ───────────────────────────────────────
 

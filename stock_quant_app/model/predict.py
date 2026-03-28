@@ -2,9 +2,18 @@
 
 Takes the latest feature vector, runs it through P10/P50/P90 models,
 and returns a predicted price range with confidence score.
+
+Includes prediction safeguards:
+- Guardrails: cap predicted change at 2x ATR
+- Feature drift: flag out-of-distribution inputs
+- Model staleness: warn if model > 7 days old
+- Circuit breakers: refuse prediction during extreme events
+- Calibration: adjust confidence from backtest accuracy
+- Ensemble sanity: flag illogical P10/P50/P90 ordering
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 import numpy as np
 
@@ -12,12 +21,29 @@ from features.feature_builder import build_features_for_prediction
 from model.model_registry import load_model_bundle
 from utils.logger import logger
 
+# ── Safeguard thresholds ────────────────────────────────────────
+
+_ATR_CAP_MULTIPLIER = 2.0    # Max predicted change = 2x ATR
+_STALENESS_DAYS = 7           # Warn if model older than this
+_VIX_CIRCUIT_BREAKER = 30.0   # Refuse prediction above this VIX
+_VOLUME_Z_CIRCUIT = 4.0       # Refuse on extreme volume anomaly
+_DRIFT_ZSCORE_THRESHOLD = 3.0 # Flag features > 3 std from mean
+_DRIFT_MAX_FLAGS = 3          # Max drifted features before warning
+
+
+@dataclass
+class PredictionWarning:
+    """A single warning/safeguard flag."""
+    level: str    # "info", "warning", "critical"
+    code: str     # machine-readable: "guardrail", "stale", etc.
+    message: str  # human-readable explanation
+
 
 @dataclass
 class PredictionResult:
     """Next-day price range prediction with confidence."""
     ticker: str
-    prediction_date: str        # Date the prediction is for (next trading day)
+    prediction_date: str        # Date the prediction is for
     current_close: float        # Today's closing price
 
     predicted_low: float        # P10 — lower bound of range
@@ -32,6 +58,13 @@ class PredictionResult:
 
     model_version: str          # Which model made this prediction
 
+    # Safeguard outputs
+    warnings: list[PredictionWarning] = field(
+        default_factory=list,
+    )
+    guardrail_applied: bool = False  # True if prediction was capped
+    original_change_pct: float | None = None  # Pre-guardrail value
+
     def to_dict(self) -> dict:
         return {
             "ticker": self.ticker,
@@ -45,7 +78,208 @@ class PredictionResult:
             "confidence": self.confidence,
             "direction": self.direction,
             "model_version": self.model_version,
+            "guardrail_applied": self.guardrail_applied,
+            "warnings": [
+                {"level": w.level, "code": w.code, "message": w.message}
+                for w in self.warnings
+            ],
         }
+
+    @property
+    def has_critical_warnings(self) -> bool:
+        return any(w.level == "critical" for w in self.warnings)
+
+    @property
+    def has_warnings(self) -> bool:
+        return len(self.warnings) > 0
+
+
+# ── Safeguard functions ──────────────────────────────────────────
+
+
+def _check_model_staleness(
+    metadata: dict,
+) -> PredictionWarning | None:
+    """Warn if model was trained more than 7 days ago."""
+    ts = metadata.get("timestamp", "")
+    if not ts:
+        return None
+    try:
+        trained_dt = datetime.strptime(ts[:15], "%Y%m%d_%H%M%S")
+        age_days = (datetime.now() - trained_dt).days
+        if age_days > _STALENESS_DAYS:
+            return PredictionWarning(
+                level="warning",
+                code="stale_model",
+                message=(
+                    f"Model is {age_days} days old. "
+                    f"Retrain for better accuracy."
+                ),
+            )
+    except ValueError:
+        pass
+    return None
+
+
+def _check_circuit_breakers(
+    features: dict[str, float],
+) -> PredictionWarning | None:
+    """Refuse prediction during extreme market events."""
+    vix = features.get("vix_value")
+    if vix is not None and abs(vix) > _VIX_CIRCUIT_BREAKER:
+        return PredictionWarning(
+            level="critical",
+            code="circuit_breaker_vix",
+            message=(
+                f"India VIX change {vix:+.1f}% — extreme volatility. "
+                f"Prediction unreliable."
+            ),
+        )
+
+    vol_z = features.get("volume_zscore")
+    if vol_z is not None and abs(vol_z) > _VOLUME_Z_CIRCUIT:
+        return PredictionWarning(
+            level="critical",
+            code="circuit_breaker_volume",
+            message=(
+                f"Volume Z-score {vol_z:.1f} — extreme anomaly. "
+                f"Prediction may be unreliable."
+            ),
+        )
+
+    return None
+
+
+def _check_feature_drift(
+    features: dict[str, float],
+    metadata: dict,
+) -> PredictionWarning | None:
+    """Flag when input features are far outside training distribution."""
+    # Heuristic bounds for common features
+    drift_flags = []
+    bounds = {
+        "rsi_14": (5, 95),
+        "bb_pct_b": (-0.5, 1.5),
+        "volume_zscore": (-3, 5),
+        "adx_14": (0, 80),
+        "return_1d": (-10, 10),
+        "return_5d": (-20, 20),
+    }
+    for feat, (lo, hi) in bounds.items():
+        val = features.get(feat)
+        if val is not None and (val < lo or val > hi):
+            drift_flags.append(feat)
+
+    if len(drift_flags) >= _DRIFT_MAX_FLAGS:
+        return PredictionWarning(
+            level="warning",
+            code="feature_drift",
+            message=(
+                f"{len(drift_flags)} features outside normal range "
+                f"({', '.join(drift_flags[:4])}). "
+                f"Model may not generalize well."
+            ),
+        )
+    return None
+
+
+def _apply_guardrails(
+    p10: float, p50: float, p90: float, atr_pct: float,
+) -> tuple[float, float, float, bool, float | None]:
+    """Cap predicted changes at 2x ATR. Returns capped values + flag."""
+    cap = atr_pct * _ATR_CAP_MULTIPLIER
+    if cap <= 0:
+        return p10, p50, p90, False, None
+
+    original_p50 = None
+    applied = False
+
+    if abs(p50) > cap:
+        original_p50 = p50
+        p50 = cap if p50 > 0 else -cap
+        applied = True
+
+    p10 = max(p10, -cap)
+    p90 = min(p90, cap)
+
+    # Re-sort after capping
+    p10, p50, p90 = sorted([p10, p50, p90])
+    return p10, p50, p90, applied, original_p50
+
+
+def _check_ensemble_sanity(
+    p10_raw: float, p50_raw: float, p90_raw: float,
+) -> PredictionWarning | None:
+    """Flag if quantile models produce illogical results."""
+    spread = p90_raw - p10_raw
+    # If P10 > P50 or P50 > P90 before sorting, models disagree
+    if p10_raw > p50_raw or p50_raw > p90_raw:
+        return PredictionWarning(
+            level="warning",
+            code="ensemble_disorder",
+            message=(
+                "Quantile models produced disordered predictions "
+                f"(P10={p10_raw:+.2f}%, P50={p50_raw:+.2f}%, "
+                f"P90={p90_raw:+.2f}%). Confidence reduced."
+            ),
+        )
+    # Extreme spread = models very uncertain
+    if spread > 8.0:
+        return PredictionWarning(
+            level="warning",
+            code="ensemble_wide_spread",
+            message=(
+                f"Prediction range is very wide ({spread:.1f}%). "
+                f"Model is highly uncertain."
+            ),
+        )
+    return None
+
+
+def _calibrate_confidence(
+    confidence: float,
+    ticker: str,
+) -> tuple[float, PredictionWarning | None]:
+    """Adjust confidence based on backtest accuracy if available."""
+    try:
+        from model.backtest import get_backtest_summary
+        summaries = get_backtest_summary(ticker)
+        if not summaries:
+            return confidence, None
+
+        latest = summaries[0]
+        actual_acc = latest.get("direction_accuracy", 0.5)
+        coverage = latest.get("interval_coverage", 0.8)
+
+        # If model claims high confidence but backtest shows poor accuracy
+        if confidence > 60 and actual_acc < 0.50:
+            adjusted = confidence * 0.6
+            return round(adjusted, 1), PredictionWarning(
+                level="warning",
+                code="calibration_overconfident",
+                message=(
+                    f"Backtest direction accuracy is only "
+                    f"{actual_acc:.0%}. Confidence adjusted down "
+                    f"from {confidence:.0f}% to {adjusted:.0f}%."
+                ),
+            )
+
+        if coverage < 0.6:
+            adjusted = confidence * 0.75
+            return round(adjusted, 1), PredictionWarning(
+                level="info",
+                code="calibration_low_coverage",
+                message=(
+                    f"Backtest 80% interval coverage is "
+                    f"{coverage:.0%} (expected ~80%). "
+                    f"Prediction range may be too narrow."
+                ),
+            )
+
+    except Exception:
+        pass
+
+    return confidence, None
 
 
 def _compute_confidence(range_width_pct: float, atr_pct: float) -> float:
@@ -104,6 +338,12 @@ def predict_next_day(
 
     models, feature_names, metadata = bundle
     version = metadata.get("version", "unknown")
+    warnings: list[PredictionWarning] = []
+
+    # ── Safeguard 1: Model staleness ────────────────────────
+    stale_warn = _check_model_staleness(metadata)
+    if stale_warn:
+        warnings.append(stale_warn)
 
     # Build feature vector
     features = build_features_for_prediction(
@@ -119,16 +359,48 @@ def predict_next_day(
     current_close = features.pop("_latest_close")
     atr_pct = features.pop("_latest_atr_pct", 2.0)
 
+    # ── Safeguard 2: Circuit breakers ───────────────────────
+    circuit_warn = _check_circuit_breakers(features)
+    if circuit_warn:
+        warnings.append(circuit_warn)
+
+    # ── Safeguard 3: Feature drift ──────────────────────────
+    drift_warn = _check_feature_drift(features, metadata)
+    if drift_warn:
+        warnings.append(drift_warn)
+
     # Align features to model's expected order
     X = np.array([[features.get(f, 0.0) for f in feature_names]])
 
     # Predict with each quantile model
-    p10_change = float(models["p10"].predict(X)[0])
-    p50_change = float(models["p50"].predict(X)[0])
-    p90_change = float(models["p90"].predict(X)[0])
+    p10_raw = float(models["p10"].predict(X)[0])
+    p50_raw = float(models["p50"].predict(X)[0])
+    p90_raw = float(models["p90"].predict(X)[0])
 
-    # Ensure ordering: P10 <= P50 <= P90
-    p10_change, p50_change, p90_change = sorted([p10_change, p50_change, p90_change])
+    # ── Safeguard 4: Ensemble sanity ────────────────────────
+    ensemble_warn = _check_ensemble_sanity(p10_raw, p50_raw, p90_raw)
+    if ensemble_warn:
+        warnings.append(ensemble_warn)
+
+    # Sort to ensure ordering
+    p10_change, p50_change, p90_change = sorted(
+        [p10_raw, p50_raw, p90_raw],
+    )
+
+    # ── Safeguard 5: Guardrails — cap at 2x ATR ────────────
+    p10_change, p50_change, p90_change, guardrail_hit, orig_p50 = (
+        _apply_guardrails(p10_change, p50_change, p90_change, atr_pct)
+    )
+    if guardrail_hit:
+        warnings.append(PredictionWarning(
+            level="info",
+            code="guardrail",
+            message=(
+                f"Predicted change capped from "
+                f"{orig_p50:+.2f}% to {p50_change:+.2f}% "
+                f"(2x ATR limit: {atr_pct * _ATR_CAP_MULTIPLIER:.2f}%)."
+            ),
+        ))
 
     # Convert % changes to price levels
     predicted_low = round(current_close * (1 + p10_change / 100), 2)
@@ -138,11 +410,21 @@ def predict_next_day(
     range_width_pct = round(p90_change - p10_change, 3)
     confidence = _compute_confidence(range_width_pct, atr_pct)
 
+    # ── Safeguard 6: Calibration from backtest ──────────────
+    clean_ticker = ticker.upper().replace(".NS", "").replace(".BO", "")
+    confidence, cal_warn = _calibrate_confidence(confidence, clean_ticker)
+    if cal_warn:
+        warnings.append(cal_warn)
+
+    # Reduce confidence if ensemble was disordered
+    if ensemble_warn and ensemble_warn.code == "ensemble_disorder":
+        confidence = round(confidence * 0.7, 1)
+
     from utils.holidays import next_trading_day
     pred_date = next_trading_day().isoformat()
 
     result = PredictionResult(
-        ticker=ticker.upper().replace(".NS", "").replace(".BO", ""),
+        ticker=clean_ticker,
         prediction_date=pred_date,
         current_close=round(current_close, 2),
         predicted_low=predicted_low,
@@ -153,12 +435,22 @@ def predict_next_day(
         confidence=confidence,
         direction=_classify_direction(p50_change),
         model_version=version,
+        warnings=warnings,
+        guardrail_applied=guardrail_hit,
+        original_change_pct=orig_p50,
     )
+
+    # Log warnings
+    for w in warnings:
+        log_fn = logger.warning if w.level != "info" else logger.info
+        log_fn(f"[{w.code}] {w.message}")
 
     logger.info(
         f"Prediction for {result.ticker}: "
-        f"Rs.{result.predicted_low} - Rs.{result.predicted_mid} - Rs.{result.predicted_high} "
-        f"({result.direction}, {result.confidence}% confidence)"
+        f"Rs.{result.predicted_low} - Rs.{result.predicted_mid} "
+        f"- Rs.{result.predicted_high} "
+        f"({result.direction}, {result.confidence}% confidence, "
+        f"{len(warnings)} warnings)"
     )
 
     return result

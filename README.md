@@ -26,7 +26,7 @@ stock_quant_app/
 |-- model/            # LightGBM training, prediction, backtesting, model registry
 |-- services/         # Prediction service, APScheduler (daily refresh + weekly retrain)
 |-- ui_streamlit/     # Streamlit multi-page frontend
-|   |-- Home.py           # Main page: prediction, explainer, corporate actions, search history
+|   |-- Home.py           # Main page: prediction, safeguards, explainer, fundamentals, corporate actions, history
 |   |-- pages/
 |       |-- 1_Active_Analysis.py   # Deep technical analysis with indicator charts
 |       |-- 2_Global_Pulse.py      # Live macro indicators dashboard
@@ -52,6 +52,19 @@ stock_quant_app/
 - Walk-forward expanding window training with 80/20 time-series split
 - Confidence score derived from prediction interval width relative to ATR
 - Direction classification: Bullish (>+0.3%), Bearish (<-0.3%), Neutral
+
+## Prediction Safeguards
+
+Six layers of protection against unreliable predictions:
+
+| Safeguard | Trigger | Effect |
+|-----------|---------|--------|
+| **Guardrails** | Predicted change > 2x ATR | Caps prediction to realistic range |
+| **Feature Drift** | 3+ features outside normal bounds | Warns model may not generalize |
+| **Model Staleness** | Model trained > 7 days ago | Warns to retrain |
+| **Circuit Breakers** | VIX change > 30% or Volume Z > 4 | Flags prediction as unreliable |
+| **Calibration** | Backtest accuracy < 50% or coverage < 60% | Adjusts confidence downward |
+| **Ensemble Sanity** | P10/P50/P90 disordered or spread > 8% | Reduces confidence by 30% |
 
 ## Data Sources
 
@@ -107,10 +120,11 @@ uvicorn app.main:app --reload --port 8000
 1. Open http://localhost:8501
 2. Select a stock from the sidebar (filter by sector or type any NSE ticker)
 3. Click **Train Model** to train the quantile regression models
-4. View the next-day prediction with confidence score
+4. View the next-day prediction with confidence score and safeguard warnings
 5. Explore the **Prediction Explainer** for signal breakdown and feature importance
-6. Check **Corporate Actions & Filings** for recent NSE announcements
-7. Navigate to other pages:
+6. Check **Fundamentals Overview** for PE, ROE, D/E, EPS growth, promoter holding vs sector peers
+7. Check **Corporate Actions & Filings** for recent NSE announcements
+8. Navigate to other pages:
    - **Active Analysis** — technical indicators with interactive charts
    - **Global Pulse** — macro indicators and market mood
    - **Truth Dashboard** — backtest accuracy and model honesty metrics

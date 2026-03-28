@@ -9,12 +9,14 @@ A beginner-friendly guide for the team on how to use the app, how predictions wo
 1. [Getting Started](#1-getting-started)
 2. [Home Page — The Main Dashboard](#2-home-page--the-main-dashboard)
 3. [How Prediction Works](#3-how-prediction-works)
-4. [Understanding the Prediction Explainer](#4-understanding-the-prediction-explainer)
-5. [Active Analysis Page](#5-active-analysis-page)
-6. [Global Pulse Page](#6-global-pulse-page)
-7. [Truth Dashboard Page](#7-truth-dashboard-page)
-8. [Key Concepts Explained](#8-key-concepts-explained)
-9. [FAQ](#9-faq)
+4. [Prediction Safeguards](#4-prediction-safeguards)
+5. [Understanding the Prediction Explainer](#5-understanding-the-prediction-explainer)
+6. [Fundamentals Overview](#6-fundamentals-overview)
+7. [Active Analysis Page](#7-active-analysis-page)
+8. [Global Pulse Page](#8-global-pulse-page)
+9. [Truth Dashboard Page](#9-truth-dashboard-page)
+10. [Key Concepts Explained](#10-key-concepts-explained)
+11. [FAQ](#11-faq)
 
 ---
 
@@ -91,6 +93,20 @@ Shows recent NSE corporate announcements for the stock:
 - Board meetings, dividends, new orders, credit ratings, insider trading, etc.
 - **Material** column = announcements that could move the stock price
 - This data is also fed into the sentiment scoring AI
+
+### Fundamentals Overview
+
+Shows company financial health vs sector peers (data from Screener.in — **free, no API credits**):
+
+| Metric | What It Shows |
+|--------|--------------|
+| **PE Ratio** | Stock valuation. Shows "Cheap/Fair/Expensive vs peers" based on sector Z-score. |
+| **ROE** | Return on Equity — profitability. Shows sector quartile (Top quartile = strong). |
+| **Debt/Equity** | Leverage ratio. "Low debt vs peers" = financially safer. |
+| **EPS CAGR 3Y** | 3-year earnings growth rate. Green if >10%, yellow if >0%, red if negative. |
+| **Promoter Holding** | % owned by founders. Shows QoQ change — declining promoter holding is a red flag. |
+
+A valuation verdict also appears: whether the stock trades at a premium or discount to sector PE.
 
 ### Price Chart
 
@@ -203,7 +219,74 @@ This gives us a calibrated prediction interval, not just a point estimate.
 
 ---
 
-## 4. Understanding the Prediction Explainer
+## 4. Prediction Safeguards
+
+The app has six layers of protection to reduce bad or overconfident predictions. These show up as colored alerts below the prediction card.
+
+### Alert Colors
+
+- **Red (Critical)** — Prediction may be unreliable. Treat with extreme caution.
+- **Yellow (Warning)** — Something is off. Prediction works but may be less accurate.
+- **Blue (Info)** — Minor adjustment was made. Prediction is still usable.
+
+### The Six Safeguards
+
+#### 1. Prediction Guardrails
+**What:** Caps the maximum predicted change at 2x the stock's typical daily volatility (ATR).
+
+**Why:** If a stock normally moves 1.5% per day, a prediction of +5% is likely a model error, not a real signal. The guardrail caps it at 3%.
+
+**What you see:** Blue info alert showing original vs capped prediction.
+
+#### 2. Feature Drift Detection
+**What:** Checks if current market conditions are outside what the model was trained on.
+
+**Why:** If RSI is at 98 but the model never saw RSI above 85 during training, it's guessing, not predicting.
+
+**What you see:** Yellow warning listing which features are out of range.
+
+#### 3. Model Staleness Warning
+**What:** Warns if the model was trained more than 7 days ago.
+
+**Why:** Markets change. A model trained 3 weeks ago may not reflect recent shifts in momentum, volatility, or sector rotation.
+
+**What you see:** Yellow warning with the model's age. Fix: click "Train Model" to retrain.
+
+#### 4. Circuit Breakers
+**What:** Flags predictions during extreme market events — VIX spiking >30% or volume Z-score >4.
+
+**Why:** During black swan events (crashes, circuit limits, panic selling), the model has no reliable training data. Any prediction would be a guess.
+
+**What you see:** Red critical alert. Do not rely on the prediction.
+
+#### 5. Calibration Check
+**What:** Compares the model's confidence against its actual backtest accuracy. If the model says "70% confidence" but has only been right 45% of the time, confidence gets adjusted down.
+
+**Why:** Prevents the model from being overconfident. If backtest direction accuracy is below 50% (worse than a coin flip), confidence is cut by 40%.
+
+**What you see:** Yellow/blue alert explaining the adjustment. Run a backtest first (Truth Dashboard) for this to work.
+
+#### 6. Ensemble Sanity Check
+**What:** Checks if the three quantile models (P10, P50, P90) agree with each other.
+
+**Why:** If the "optimistic" model (P90) predicts a lower price than the "pessimistic" model (P10), something is wrong. Also flags when the prediction spread is very wide (>8%).
+
+**What you see:** Yellow warning. Confidence is automatically reduced by 30%.
+
+### How to Respond to Warnings
+
+| Warning | Action |
+|---------|--------|
+| Model is stale | Click "Train Model" to retrain |
+| Feature drift | Check Active Analysis — is the stock in unusual territory? |
+| Circuit breaker | Wait for markets to stabilize before trusting predictions |
+| Calibration low | Run a backtest, then retrain if accuracy is poor |
+| Guardrail applied | The original prediction was extreme — use the capped value |
+| Ensemble disorder | Low confidence in prediction — consider waiting |
+
+---
+
+## 5. Understanding the Prediction Explainer
 
 ### Signal Summary Table
 
@@ -239,7 +322,45 @@ This changes per stock — RSI might be important for RELIANCE but not for TCS.
 
 ---
 
-## 5. Active Analysis Page
+## 6. Fundamentals Overview
+
+The Fundamentals Overview section (expandable on the Home page) shows company financials compared to sector peers.
+
+### What Each Metric Means
+
+| Metric | Good Value | Bad Value | Source |
+|--------|-----------|-----------|--------|
+| **PE Ratio** | Low PE Z-score (cheap vs peers) | High PE Z-score (expensive) | Screener.in |
+| **ROE (Return on Equity)** | Top quartile (>75th percentile) | Below median | Screener.in |
+| **Debt/Equity** | Low ratio, high percentile vs peers | High debt relative to sector | Screener.in |
+| **EPS CAGR 3Y** | >10% (strong growth) | Negative (earnings declining) | Screener.in P&L |
+| **Promoter Holding** | >50%, stable or increasing QoQ | Declining each quarter (red flag) | Screener.in shareholding |
+
+### How Sector Comparison Works
+
+The app doesn't just show raw numbers — it compares them to the stock's sector peers:
+
+- **PE Z-Score**: How many standard deviations from the sector average. Negative = cheaper than peers.
+- **ROE Percentile**: Ranks the stock's ROE among its sector peers. 0.9 = top 10%.
+- **D/E Percentile**: Inverted — a high percentile means *lower* debt than peers (good).
+
+### Valuation Verdict
+
+At the bottom, you'll see a one-line verdict:
+- **"Trading at 1.5x sector PE — premium valuation"** = stock is expensive relative to sector
+- **"Trading at 0.7x sector PE — discount valuation"** = stock is cheap relative to sector
+- **"Trading near sector PE — fair valuation"** = in line with peers
+
+### Important Notes
+
+- Fundamentals update **quarterly** (cached 24 hours)
+- This data is **free** — scraped from Screener.in, no API credits
+- Some stocks (especially newer or smaller ones) may not have data on Screener.in
+- Fundamentals are also used as ML features when "Include Fundamentals" is checked during training
+
+---
+
+## 7. Active Analysis Page
 
 Deep technical analysis for the selected stock. Useful for understanding current market conditions.
 
@@ -266,7 +387,7 @@ Deep technical analysis for the selected stock. Useful for understanding current
 
 ---
 
-## 6. Global Pulse Page
+## 8. Global Pulse Page
 
 Shows real-time global macro indicators that affect Indian markets.
 
@@ -296,7 +417,7 @@ An aggregate score from -1 (very bearish) to +1 (very bullish), combining all in
 
 ---
 
-## 7. Truth Dashboard Page
+## 9. Truth Dashboard Page
 
 This is the **honesty page** — it shows how accurate the model actually is.
 
@@ -336,7 +457,7 @@ This takes 1-3 minutes depending on the stock and years selected.
 
 ---
 
-## 8. Key Concepts Explained
+## 10. Key Concepts Explained
 
 ### What is RSI?
 
@@ -405,7 +526,7 @@ Used for volume (is today's volume unusual?) and PE ratio (is this stock expensi
 
 ---
 
-## 9. FAQ
+## 11. FAQ
 
 ### How often should I retrain models?
 

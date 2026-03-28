@@ -56,6 +56,15 @@ if existing_models:
             with p_right:
                 confidence_badge(pred.confidence, pred.direction)
             st.markdown(f'<div style="text-align:right;color:#78909C;font-size:0.75rem;margin-top:4px">Model: <code>{pred.model_version}</code></div>', unsafe_allow_html=True)
+            if pred.has_warnings:
+                for w in pred.warnings:
+                    icon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(w.level, "")
+                    if w.level == "critical":
+                        st.error(f"{icon} {w.message}")
+                    elif w.level == "warning":
+                        st.warning(f"{icon} {w.message}")
+                    else:
+                        st.info(f"{icon} {w.message}")
     except Exception as e:
         st.caption(f"Prediction unavailable: {e}")
 else:
