@@ -21,6 +21,7 @@ from ui_streamlit.components.styles import (
     inject_global_css, styled_header, metric_card, confidence_badge,
     prediction_range_card, section_header, COLORS,
 )
+from data.cache import get_json, set_json
 from data.fetch_ohlc import fetch_ohlc
 from model.model_registry import list_models
 from model.predict import predict_next_day
@@ -30,12 +31,18 @@ from utils.sectors import (
     SECTOR_STOCKS, get_sector, get_company_name, get_all_tickers, get_all_sectors,
 )
 
+_HISTORY_KEY = "ui:search_history"
+_HISTORY_MAX = 50
+# 10 years TTL — effectively never expires
+_HISTORY_TTL = 86400 * 365 * 10
+
 inject_global_css()
 
-# ── Initialize session state ────────────────────────────────────
+# ── Initialize session state (load from DB) ─────────────────────
 
 if "search_history" not in st.session_state:
-    st.session_state["search_history"] = []
+    saved = get_json(_HISTORY_KEY, ttl=_HISTORY_TTL)
+    st.session_state["search_history"] = saved if isinstance(saved, list) else []
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
@@ -193,15 +200,16 @@ history_entry = {
     "Confidence": f"{pred.confidence}%" if pred else "—",
 }
 
-# Avoid duplicate consecutive entries
+# Avoid duplicate consecutive entries; rolling window of 50
 history = st.session_state["search_history"]
 if not history or history[-1]["Ticker"] != selected_ticker:
+    if len(history) >= _HISTORY_MAX:
+        history = history[1:]  # Drop oldest
     history.append(history_entry)
-    # Keep last 50
-    st.session_state["search_history"] = history[-50:]
 else:
-    # Update the latest entry for same ticker
-    history[-1] = history_entry
+    history[-1] = history_entry  # Update latest for same ticker
+st.session_state["search_history"] = history
+set_json(_HISTORY_KEY, history)
 
 # ── Candlestick Chart ────────────────────────────────────────────
 
@@ -258,6 +266,7 @@ if history:
 
     if st.button("Clear History", type="secondary"):
         st.session_state["search_history"] = []
+        set_json(_HISTORY_KEY, [])
         st.rerun()
 else:
     st.caption("Browse stocks to build your search history.")
