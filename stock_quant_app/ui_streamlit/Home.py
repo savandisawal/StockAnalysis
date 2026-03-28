@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
+import pandas as pd
 
 st.set_page_config(
     page_title="Stock Quant App",
@@ -21,33 +22,72 @@ from ui_streamlit.components.styles import (
     prediction_range_card, section_header, COLORS,
 )
 from data.fetch_ohlc import fetch_ohlc
-from features.technicals import compute_all_technicals
 from model.model_registry import list_models
 from model.predict import predict_next_day
 from model.train_model import train_quantile_models, get_feature_importance
 from ui_streamlit.components.charts import candlestick_chart
-from utils.sectors import SECTOR_STOCKS, get_sector
+from utils.sectors import (
+    SECTOR_STOCKS, get_sector, get_company_name, get_all_tickers, get_all_sectors,
+)
 
 inject_global_css()
+
+# ── Initialize session state ────────────────────────────────────
+
+if "search_history" not in st.session_state:
+    st.session_state["search_history"] = []
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
 st.sidebar.markdown('<div style="text-align:center;padding:16px 0 8px 0"><div style="font-size:2rem;margin-bottom:4px">Q</div><div style="font-size:1.2rem;font-weight:800;background:linear-gradient(90deg,#6C63FF,#00D4AA);-webkit-background-clip:text;-webkit-text-fill-color:transparent">STOCK QUANT</div><div style="color:#78909C;font-size:0.75rem;margin-top:2px">NSE India Price Predictor</div></div>', unsafe_allow_html=True)
 st.sidebar.divider()
 
-all_tickers = sorted(set(
-    ticker for tickers in SECTOR_STOCKS.values() for ticker in tickers
-))
-selected_ticker = st.sidebar.selectbox(
-    "Select Stock",
-    options=all_tickers,
-    index=all_tickers.index("RELIANCE") if "RELIANCE" in all_tickers else 0,
+# Stock selection — sector filter + searchable dropdown + custom input
+st.sidebar.markdown("**Select Stock**")
+
+# Sector filter
+all_sectors = ["All Sectors"] + get_all_sectors()
+selected_sector = st.sidebar.selectbox(
+    "Filter by Sector", options=all_sectors, label_visibility="collapsed",
 )
+
+# Build filtered options with company names
+if selected_sector == "All Sectors":
+    ticker_list = get_all_tickers()
+else:
+    ticker_list = [t for t, _ in SECTOR_STOCKS[selected_sector]]
+
+display_options = [f"{t} — {get_company_name(t)}" for t in ticker_list]
+ticker_map = dict(zip(display_options, ticker_list))
+
+# Default selection
+default_display = f"RELIANCE — {get_company_name('RELIANCE')}"
+default_idx = display_options.index(default_display) if default_display in display_options else 0
+
+selected_display = st.sidebar.selectbox(
+    "Stock", options=display_options, index=default_idx, label_visibility="collapsed",
+)
+selected_ticker = ticker_map[selected_display]
+
+# Custom ticker input
+st.sidebar.markdown(
+    '<div style="color:#78909C;font-size:0.75rem;margin:-8px 0 4px 0">'
+    'Or enter any NSE ticker:</div>',
+    unsafe_allow_html=True,
+)
+custom_ticker = st.sidebar.text_input(
+    "Custom ticker", value="", placeholder="e.g. ZOMATO, PAYTM",
+    label_visibility="collapsed",
+)
+if custom_ticker.strip():
+    selected_ticker = custom_ticker.strip().upper().replace(".NS", "").replace(".BO", "")
+
 st.session_state["selected_ticker"] = selected_ticker
 
 sector = get_sector(selected_ticker)
+company = get_company_name(selected_ticker)
 if sector:
-    st.sidebar.markdown(f'<div style="background:#6C63FF15;border:1px solid #6C63FF30;border-radius:8px;padding:8px 12px;text-align:center;margin:8px 0"><span style="color:#9E9E9E;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px">Sector</span><br><span style="color:#BB86FC;font-weight:600">{sector}</span></div>', unsafe_allow_html=True)
+    st.sidebar.markdown(f'<div style="background:rgba(108,99,255,0.08);border:1px solid rgba(108,99,255,0.19);border-radius:8px;padding:8px 12px;text-align:center;margin:8px 0"><span style="color:#9E9E9E;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px">Sector</span><br><span style="color:#BB86FC;font-weight:600">{sector}</span></div>', unsafe_allow_html=True)
 
 st.sidebar.divider()
 st.sidebar.markdown("**Model Controls**")
@@ -77,13 +117,14 @@ except Exception:
 
 if existing_models:
     ts = existing_models[0].get('timestamp', '')[:8]
-    st.sidebar.markdown(f'<div style="background:#00E67615;border:1px solid #00E67630;border-radius:8px;padding:8px 12px;margin-top:8px"><span style="color:#00E676;font-size:0.8rem">Model ready</span><span style="color:#78909C;font-size:0.7rem"> | {ts}</span></div>', unsafe_allow_html=True)
+    st.sidebar.markdown(f'<div style="background:rgba(0,230,118,0.08);border:1px solid rgba(0,230,118,0.19);border-radius:8px;padding:8px 12px;margin-top:8px"><span style="color:#00E676;font-size:0.8rem">Model ready</span><span style="color:#78909C;font-size:0.7rem"> | {ts}</span></div>', unsafe_allow_html=True)
 else:
     st.sidebar.warning("No model trained yet")
 
 # ── Main Content ─────────────────────────────────────────────────
 
-styled_header(selected_ticker, f"{sector} sector | NSE India" if sector else "NSE India")
+header_subtitle = f"{company} | {sector} sector" if sector else company
+styled_header(selected_ticker, header_subtitle)
 
 try:
     with st.spinner("Loading market data..."):
@@ -115,6 +156,7 @@ with col4:
 # ── Prediction Section ───────────────────────────────────────────
 
 prediction = None
+pred = None
 if existing_models:
     try:
         pred = predict_next_day(
@@ -133,6 +175,33 @@ if existing_models:
                 confidence_badge(pred.confidence, pred.direction)
     except Exception as e:
         st.caption(f"Prediction unavailable: {e}")
+
+# ── Record search history ───────────────────────────────────────
+
+history_entry = {
+    "Ticker": selected_ticker,
+    "Company": company,
+    "Sector": sector or "—",
+    "Date": str(df.index[-1].date()),
+    "Close": round(latest["Close"], 2),
+    "Change %": round(daily_change, 2),
+    "High": round(latest["High"], 2),
+    "Low": round(latest["Low"], 2),
+    "Volume": int(latest["Volume"]),
+    "Prediction": f"Rs.{pred.predicted_mid:,.2f}" if pred else "—",
+    "Direction": pred.direction if pred else "—",
+    "Confidence": f"{pred.confidence}%" if pred else "—",
+}
+
+# Avoid duplicate consecutive entries
+history = st.session_state["search_history"]
+if not history or history[-1]["Ticker"] != selected_ticker:
+    history.append(history_entry)
+    # Keep last 50
+    st.session_state["search_history"] = history[-50:]
+else:
+    # Update the latest entry for same ticker
+    history[-1] = history_entry
 
 # ── Candlestick Chart ────────────────────────────────────────────
 
@@ -163,3 +232,32 @@ if existing_models:
                 st.plotly_chart(fig, use_container_width=True)
         except Exception:
             st.caption("Train a model to see feature importance.")
+
+# ── Search History ──────────────────────────────────────────────
+
+st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+section_header("Search History")
+
+history = st.session_state["search_history"]
+if history:
+    hist_df = pd.DataFrame(reversed(history))
+
+    # Style the change column
+    st.dataframe(
+        hist_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Close": st.column_config.NumberColumn(format="Rs.%.2f"),
+            "High": st.column_config.NumberColumn(format="Rs.%.2f"),
+            "Low": st.column_config.NumberColumn(format="Rs.%.2f"),
+            "Change %": st.column_config.NumberColumn(format="%.2f%%"),
+            "Volume": st.column_config.NumberColumn(format="%d"),
+        },
+    )
+
+    if st.button("Clear History", type="secondary"):
+        st.session_state["search_history"] = []
+        st.rerun()
+else:
+    st.caption("Browse stocks to build your search history.")
