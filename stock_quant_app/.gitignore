@@ -20,8 +20,9 @@ ENV/
 *.swp
 *.swo
 
-# Environment variables
+# Environment variables & secrets
 .env
+.streamlit/secrets.toml
 
 # Database
 *.db

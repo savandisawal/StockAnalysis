@@ -1,11 +1,29 @@
-"""Application configuration loaded from environment variables."""
+"""Application configuration loaded from environment variables.
 
+Supports both local .env files and Streamlit Cloud secrets.
+"""
+
+import os
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_streamlit_secrets():
+    """Inject Streamlit Cloud secrets into environment variables."""
+    try:
+        import streamlit as st
+        for key, val in st.secrets.items():
+            if isinstance(val, str) and key not in os.environ:
+                os.environ[key] = val
+    except Exception:
+        pass
+
+
+_load_streamlit_secrets()
 
 
 class Settings(BaseSettings):
