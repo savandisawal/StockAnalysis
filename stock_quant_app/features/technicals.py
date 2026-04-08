@@ -17,7 +17,15 @@ Features:
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+from utils.logger import logger
+
+try:
+    import pandas_ta as ta
+    _PANDAS_TA_AVAILABLE = True
+except Exception as _e:  # noqa: BLE001
+    ta = None  # type: ignore[assignment]
+    _PANDAS_TA_AVAILABLE = False
+    logger.warning(f"pandas_ta unavailable — technical indicators disabled: {_e}")
 
 
 def add_rsi(df: pd.DataFrame, length: int = 14) -> pd.DataFrame:
@@ -147,13 +155,18 @@ def compute_all_technicals(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     df = add_returns(df)
+    df = add_volume_zscore(df)
+
+    if not _PANDAS_TA_AVAILABLE:
+        logger.warning("pandas_ta not available — returning only return-based features")
+        return df
+
     df = add_rsi(df)
     df = add_macd(df)
     df = add_bollinger_bands(df)
     df = add_ema_positions(df)
     df = add_atr(df)
     df = add_adx(df)
-    df = add_volume_zscore(df)
     df = add_market_regime(df)
 
     return df
