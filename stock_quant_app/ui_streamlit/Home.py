@@ -112,7 +112,7 @@ if sector:
 
 st.sidebar.divider()
 st.sidebar.markdown("**Model Controls**")
-train_years = st.sidebar.slider("Training years", 1, 5, 2)
+train_years = st.sidebar.slider("Training years", 1, 3, 2)
 use_fundamentals = st.sidebar.checkbox("Include Fundamentals", value=False)
 use_macro = st.sidebar.checkbox("Include Macro/Sentiment", value=False)
 
