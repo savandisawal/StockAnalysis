@@ -225,7 +225,7 @@ if pred:
             def _color_sentiment(val):
                 colors = {"Bullish": "#00E676", "Bearish": "#FF5252", "Neutral": "#FFD740"}
                 return f"color: {colors.get(val, '#C0C0C0')}"
-            styled_df = sig_df.style.applymap(_color_sentiment, subset=["sentiment"])
+            styled_df = sig_df.style.map(_color_sentiment, subset=["sentiment"])
             st.dataframe(
                 styled_df, use_container_width=True, hide_index=True,
                 column_config={
