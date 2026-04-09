@@ -132,22 +132,28 @@ elif _already_trained:
 _train_disabled = _already_trained or _limit_reached
 
 if st.sidebar.button("Train Model", type="primary", use_container_width=True, disabled=_train_disabled):
-    with st.sidebar.status(f"Training {selected_ticker}...", expanded=True) as status:
-        st.write("Fetching data & computing features...")
-        try:
-            models, features, metrics = train_quantile_models(
-                selected_ticker, years=train_years,
-                include_fundamentals=use_fundamentals,
-                include_macro=use_macro,
-            )
-            st.write(f"Direction accuracy: {metrics['direction_accuracy']:.1%}")
-            st.write(f"Interval coverage: {metrics['interval_coverage_80']:.1%}")
-            status.update(label="Training complete!", state="complete")
-            if selected_ticker not in _today_trained:
-                _today_trained.append(selected_ticker)
-            set_json(_TRAIN_LIMIT_KEY, _today_trained)
-        except Exception as e:
-            status.update(label=f"Failed: {e}", state="error")
+    # Re-read from cache at click time — guards against stale UI state
+    _trained_now = get_json(_TRAIN_LIMIT_KEY, ttl=_TRAIN_LIMIT_TTL) or []
+    if selected_ticker in _trained_now:
+        st.sidebar.error(f"{selected_ticker} already trained today. Come back tomorrow.", icon="🚫")
+    elif len(_trained_now) >= _MAX_TRAINS_PER_DAY:
+        st.sidebar.error(f"Daily limit of {_MAX_TRAINS_PER_DAY} stocks reached.", icon="🚫")
+    else:
+        with st.sidebar.status(f"Training {selected_ticker}...", expanded=True) as status:
+            st.write("Fetching data & computing features...")
+            try:
+                models, features, metrics = train_quantile_models(
+                    selected_ticker, years=train_years,
+                    include_fundamentals=use_fundamentals,
+                    include_macro=use_macro,
+                )
+                st.write(f"Direction accuracy: {metrics['direction_accuracy']:.1%}")
+                st.write(f"Interval coverage: {metrics['interval_coverage_80']:.1%}")
+                status.update(label="Training complete!", state="complete")
+                _trained_now.append(selected_ticker)
+                set_json(_TRAIN_LIMIT_KEY, _trained_now)
+            except Exception as e:
+                status.update(label=f"Failed: {e}", state="error")
 
 try:
     existing_models = list_models(selected_ticker)
