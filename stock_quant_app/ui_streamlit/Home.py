@@ -4,6 +4,7 @@ Run: streamlit run ui_streamlit/Home.py
 """
 
 import sys
+from datetime import date
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -115,7 +116,22 @@ train_years = st.sidebar.slider("Training years", 1, 5, 2)
 use_fundamentals = st.sidebar.checkbox("Include Fundamentals", value=False)
 use_macro = st.sidebar.checkbox("Include Macro/Sentiment", value=False)
 
-if st.sidebar.button("Train Model", type="primary", use_container_width=True):
+_TRAIN_LIMIT_KEY = f"training:log:{date.today().isoformat()}"
+_TRAIN_LIMIT_TTL = 86400 * 2  # 2 days — survives the full calendar day
+_MAX_TRAINS_PER_DAY = 10
+
+_today_trained: list = get_json(_TRAIN_LIMIT_KEY, ttl=_TRAIN_LIMIT_TTL) or []
+_already_trained = selected_ticker in _today_trained
+_limit_reached = len(_today_trained) >= _MAX_TRAINS_PER_DAY
+
+if _limit_reached:
+    st.sidebar.warning(f"Daily limit reached — {_MAX_TRAINS_PER_DAY} stocks trained today.", icon="🚫")
+elif _already_trained:
+    st.sidebar.info(f"{selected_ticker} already trained today.", icon="✅")
+
+_train_disabled = _already_trained or _limit_reached
+
+if st.sidebar.button("Train Model", type="primary", use_container_width=True, disabled=_train_disabled):
     with st.sidebar.status(f"Training {selected_ticker}...", expanded=True) as status:
         st.write("Fetching data & computing features...")
         try:
@@ -127,6 +143,9 @@ if st.sidebar.button("Train Model", type="primary", use_container_width=True):
             st.write(f"Direction accuracy: {metrics['direction_accuracy']:.1%}")
             st.write(f"Interval coverage: {metrics['interval_coverage_80']:.1%}")
             status.update(label="Training complete!", state="complete")
+            if selected_ticker not in _today_trained:
+                _today_trained.append(selected_ticker)
+            set_json(_TRAIN_LIMIT_KEY, _today_trained)
         except Exception as e:
             status.update(label=f"Failed: {e}", state="error")
 
