@@ -62,6 +62,7 @@ _IMPORTANT_CATEGORIES = {
 @dataclass
 class CorporateAnnouncement:
     """A single corporate announcement from NSE."""
+
     date: str
     category: str
     subject: str
@@ -71,6 +72,7 @@ class CorporateAnnouncement:
 @dataclass
 class CorporateFilings:
     """Corporate filings summary for a stock."""
+
     ticker: str
     announcements: list[CorporateAnnouncement] = field(default_factory=list)
     total_count: int = 0
@@ -108,11 +110,29 @@ def _is_important(desc: str, subject: str) -> bool:
     """Check if an announcement is material for prediction."""
     text = f"{desc} {subject}".lower()
     keywords = [
-        "board meeting", "financial result", "dividend", "new order",
-        "contract", "acquisition", "merger", "pledge", "loan",
-        "credit rating", "buyback", "bonus", "split", "rights issue",
-        "insider", "sast", "fund raising", "outcome of board",
-        "quarterly", "annual", "profit", "revenue", "loss",
+        "board meeting",
+        "financial result",
+        "dividend",
+        "new order",
+        "contract",
+        "acquisition",
+        "merger",
+        "pledge",
+        "loan",
+        "credit rating",
+        "buyback",
+        "bonus",
+        "split",
+        "rights issue",
+        "insider",
+        "sast",
+        "fund raising",
+        "outcome of board",
+        "quarterly",
+        "annual",
+        "profit",
+        "revenue",
+        "loss",
     ]
     return any(kw in text for kw in keywords)
 
@@ -142,25 +162,21 @@ def fetch_corporate_announcements(
                 ticker=symbol,
                 total_count=cached.get("total_count", 0),
                 fetch_date=cached.get("fetch_date", ""),
-                announcements=[
-                    CorporateAnnouncement(**a)
-                    for a in cached.get("announcements", [])
-                ],
+                announcements=[CorporateAnnouncement(**a) for a in cached.get("announcements", [])],
             )
             if filings.announcements:
                 return filings
 
     try:
         client = httpx.Client(
-            headers=_NSE_HEADERS, follow_redirects=True, timeout=15,
+            headers=_NSE_HEADERS,
+            follow_redirects=True,
+            timeout=15,
         )
         # Get session cookies
         client.get(_NSE_BASE)
 
-        url = (
-            f"{_NSE_BASE}/api/corporate-announcements"
-            f"?index=equities&symbol={symbol}"
-        )
+        url = f"{_NSE_BASE}/api/corporate-announcements?index=equities&symbol={symbol}"
         resp = client.get(url)
         resp.raise_for_status()
         data = resp.json()
@@ -183,9 +199,7 @@ def fetch_corporate_announcements(
 
         # Parse date
         try:
-            ann_dt = datetime.strptime(
-                ann_date_str.split(" ")[0], "%d-%b-%Y"
-            ).date()
+            ann_dt = datetime.strptime(ann_date_str.split(" ")[0], "%d-%b-%Y").date()
         except (ValueError, IndexError):
             ann_dt = cutoff
 
@@ -193,12 +207,14 @@ def fetch_corporate_announcements(
             continue
 
         important = _is_important(desc, subject)
-        announcements.append(CorporateAnnouncement(
-            date=str(ann_dt),
-            category=desc.split("\u2013")[0].strip() if "\u2013" in desc else desc.strip(),
-            subject=subject.strip()[:200],
-            is_important=important,
-        ))
+        announcements.append(
+            CorporateAnnouncement(
+                date=str(ann_dt),
+                category=desc.split("\u2013")[0].strip() if "\u2013" in desc else desc.strip(),
+                subject=subject.strip()[:200],
+                is_important=important,
+            )
+        )
 
     filings = CorporateFilings(
         ticker=symbol,

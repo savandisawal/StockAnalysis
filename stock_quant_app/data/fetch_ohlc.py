@@ -47,13 +47,16 @@ def _fetch_jugaad(symbol: str, from_date: date, to_date: date) -> pd.DataFrame:
     # the correct trading date.
     ist_dates = pd.to_datetime(raw["DATE"]) + pd.Timedelta(hours=5, minutes=30)
 
-    df = pd.DataFrame({
-        "Open": raw["OPEN"].values,
-        "High": raw["HIGH"].values,
-        "Low": raw["LOW"].values,
-        "Close": raw["CLOSE"].values,
-        "Volume": raw["VOLUME"].values,
-    }, index=pd.DatetimeIndex(ist_dates.dt.normalize(), name="Date"))
+    df = pd.DataFrame(
+        {
+            "Open": raw["OPEN"].values,
+            "High": raw["HIGH"].values,
+            "Low": raw["LOW"].values,
+            "Close": raw["CLOSE"].values,
+            "Volume": raw["VOLUME"].values,
+        },
+        index=pd.DatetimeIndex(ist_dates.dt.normalize(), name="Date"),
+    )
 
     df = df.sort_index()
     df = df[~df.index.duplicated(keep="last")]
@@ -70,7 +73,8 @@ def _fetch_yfinance(ticker: str, start: date, end: date) -> pd.DataFrame:
             stock = yf.Ticker(ticker)
             # yfinance end is exclusive, so add 1 day
             df = stock.history(
-                start=str(start), end=str(end + timedelta(days=1)),
+                start=str(start),
+                end=str(end + timedelta(days=1)),
                 auto_adjust=True,
             )
             if not df.empty:
@@ -133,8 +137,7 @@ def fetch_ohlc(
         logger.info(f"Fetching {symbol} OHLC from NSE (jugaad-data)")
         df = _fetch_jugaad(symbol, from_date=start, to_date=end)
         if not df.empty:
-            logger.info(f"NSE: fetched {len(df)} rows for {symbol}, "
-                        f"latest={df.index[-1].date()}")
+            logger.info(f"NSE: fetched {len(df)} rows for {symbol}, latest={df.index[-1].date()}")
     except Exception as e:
         logger.warning(f"jugaad-data failed for {symbol}: {e}")
 

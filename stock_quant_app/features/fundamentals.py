@@ -14,18 +14,35 @@ Features:
 
 from dataclasses import dataclass
 
-from data.fetch_fundamentals import FundamentalData, fetch_fundamentals
+import numpy as np
+import pandas as pd
+
+from data.fetch_fundamentals import (
+    FundamentalData,
+    FundamentalHistory,
+    fetch_fundamentals,
+    fetch_fundamentals_history,
+)
 from utils.logger import logger
 from utils.sectors import get_sector_peers
+
+# SEBI LODR reporting deadlines: quarterly results within 45 days of the
+# quarter end, audited annual results within 60 days of the fiscal year end.
+# A period's numbers only become model-visible after this lag.
+REPORTING_LAG_DAYS_Q = 45
+REPORTING_LAG_DAYS_A = 60
+
+_MAX_PEERS = 8
 
 
 @dataclass
 class FundamentalFeatures:
     """Processed fundamental features ready for ML model."""
-    pe_zscore: float | None = None        # vs sector median
-    roe_percentile: float | None = None   # vs sector (0-1)
-    de_percentile: float | None = None    # vs sector (0-1), lower = better
-    eps_cagr_3y: float | None = None      # raw percentage
+
+    pe_zscore: float | None = None  # vs sector median
+    roe_percentile: float | None = None  # vs sector (0-1)
+    de_percentile: float | None = None  # vs sector (0-1), lower = better
+    eps_cagr_3y: float | None = None  # raw percentage
     promoter_change: float | None = None  # QoQ change in percentage points
     sector: str | None = None
 
@@ -44,6 +61,7 @@ def _zscore(value: float, values: list[float]) -> float | None:
     if not values or len(values) < 2:
         return None
     import numpy as np
+
     arr = [v for v in values if v is not None]
     if len(arr) < 2:
         return None
@@ -134,6 +152,175 @@ def compute_fundamental_features(
         f"ROE_pct={result.roe_percentile}, D/E_pct={result.de_percentile}"
     )
     return result
+
+
+# ── Point-in-time (per-date) feature construction ────────────────
+
+
+def _lag_availability(series: pd.Series, lag_days: int) -> pd.Series:
+    """Shift a period-end-indexed series to its public-availability dates."""
+    if series is None or series.empty:
+        return pd.Series(dtype=float)
+    s = series.copy()
+    s.index = s.index + pd.Timedelta(days=lag_days)
+    return s
+
+
+def _step_align(series: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
+    """Forward-fill a sparse availability-dated series onto a daily index.
+
+    Dates before the first available value stay NaN (genuinely unknown then).
+    """
+    if series is None or series.empty:
+        return pd.Series(index=index, dtype=float)
+    combined = series.reindex(series.index.union(index)).ffill()
+    return combined.reindex(index)
+
+
+def _eps_cagr_series(annual_eps: pd.Series) -> pd.Series:
+    """3Y EPS CAGR at each fiscal-year point (needs 4 annual values)."""
+    if annual_eps is None or len(annual_eps) < 4:
+        return pd.Series(dtype=float)
+    out = {}
+    values = annual_eps.sort_index()
+    for i in range(3, len(values)):
+        old, new = values.iloc[i - 3], values.iloc[i]
+        if old and old > 0 and new > 0:
+            out[values.index[i]] = round(((new / old) ** (1 / 3) - 1) * 100, 2)
+    return pd.Series(out, dtype=float)
+
+
+def _pe_series(history: FundamentalHistory, close: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
+    """Daily PE = close(t) / TTM EPS available at t."""
+    ttm = _step_align(_lag_availability(history.ttm_eps(), REPORTING_LAG_DAYS_Q), index)
+    close_aligned = close.reindex(index).ffill()
+    pe = close_aligned / ttm.replace(0, np.nan)
+    return pe.where((ttm > 0), np.nan)
+
+
+def _fetch_peer_data(
+    ticker: str, index: pd.DatetimeIndex, use_cache: bool
+) -> dict[str, tuple[FundamentalHistory, pd.Series]]:
+    """Fetch fundamental histories + close prices for sector peers."""
+    from data.fetch_ohlc import fetch_ohlc  # local import to avoid cycle at module load
+
+    peers = get_sector_peers(ticker)[:_MAX_PEERS]
+    years = max(2, int(np.ceil((index[-1] - index[0]).days / 365.25)) + 1)
+
+    out: dict[str, tuple[FundamentalHistory, pd.Series]] = {}
+    for peer in peers:
+        try:
+            hist = fetch_fundamentals_history(peer, use_cache=use_cache)
+            if not hist.is_valid:
+                continue
+            ohlc = fetch_ohlc(peer, years=years)
+            if ohlc.empty:
+                continue
+            out[peer] = (hist, ohlc["Close"])
+        except Exception as e:
+            logger.warning(f"Peer data failed for {peer}: {e}")
+    return out
+
+
+def build_fundamental_history_features(
+    ticker: str,
+    index: pd.DatetimeIndex,
+    close: pd.Series | None = None,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Build leakage-free per-date fundamental features aligned to `index`.
+
+    Every quarterly/annual figure only enters the features after its SEBI
+    reporting deadline (45d quarterly / 60d annual), then forward-fills.
+    Sector-relative z-scores/percentiles are computed per date against
+    peers' own point-in-time values.
+
+    Sets df.attrs["point_in_time"] = False when the Screener.in history was
+    unavailable and columns fell back to NaN (filled with neutral defaults
+    downstream).
+    """
+    df = pd.DataFrame(index=index, columns=FUNDAMENTAL_FEATURES, dtype=float)
+    df.attrs["point_in_time"] = False
+
+    try:
+        target = fetch_fundamentals_history(ticker, use_cache=use_cache)
+    except Exception as e:
+        logger.warning(f"Fundamental history fetch failed for {ticker}: {e}")
+        return df
+
+    if not target.is_valid:
+        logger.warning(f"No fundamental history for {ticker} — using neutral defaults")
+        return df
+
+    df.attrs["point_in_time"] = True
+
+    # ── Raw (already comparable) features ────────────────────
+    df["eps_cagr_3y"] = _step_align(
+        _lag_availability(_eps_cagr_series(target.annual_eps), REPORTING_LAG_DAYS_A), index
+    )
+    if target.promoter_pct is not None and len(target.promoter_pct) >= 2:
+        promoter_change = target.promoter_pct.sort_index().diff().dropna().round(2)
+        df["promoter_change"] = _step_align(
+            _lag_availability(promoter_change, REPORTING_LAG_DAYS_Q), index
+        )
+
+    # ── Sector-relative features (need peers) ────────────────
+    peer_data = _fetch_peer_data(ticker, index, use_cache)
+    if not peer_data:
+        logger.warning(f"No peer data for {ticker} — sector-relative features stay neutral")
+        return df
+
+    # PE z-score: daily PE for target + peers, z-score per date
+    if close is not None:
+        pe_frame = pd.DataFrame(index=index)
+        pe_frame["__target__"] = _pe_series(target, close, index)
+        for peer, (hist, peer_close) in peer_data.items():
+            pe_frame[peer] = _pe_series(hist, peer_close, index)
+        df["pe_zscore"] = _cross_sectional_zscore(pe_frame, "__target__")
+
+    # ROE / D-E percentiles: annual step series per entity
+    roe_frame = pd.DataFrame(index=index)
+    de_frame = pd.DataFrame(index=index)
+    roe_frame["__target__"] = _step_align(
+        _lag_availability(target.annual_roe(), REPORTING_LAG_DAYS_A), index
+    )
+    de_frame["__target__"] = _step_align(
+        _lag_availability(target.annual_de(), REPORTING_LAG_DAYS_A), index
+    )
+    for peer, (hist, _) in peer_data.items():
+        roe_frame[peer] = _step_align(
+            _lag_availability(hist.annual_roe(), REPORTING_LAG_DAYS_A), index
+        )
+        de_frame[peer] = _step_align(
+            _lag_availability(hist.annual_de(), REPORTING_LAG_DAYS_A), index
+        )
+
+    df["roe_percentile"] = _cross_sectional_percentile(roe_frame, "__target__")
+    # Low D/E is good — invert so higher percentile = healthier balance sheet
+    de_pct = _cross_sectional_percentile(de_frame, "__target__")
+    df["de_percentile"] = (1.0 - de_pct).round(3)
+
+    return df
+
+
+def _cross_sectional_zscore(frame: pd.DataFrame, target_col: str) -> pd.Series:
+    """Per-date z-score of target column vs all columns (incl. target)."""
+    valid = frame.notna().sum(axis=1)
+    mean = frame.mean(axis=1)
+    std = frame.std(axis=1, ddof=0)
+    z = (frame[target_col] - mean) / std.replace(0, np.nan)
+    z = z.where(valid >= 2)
+    return z.fillna(pd.Series(0.0, index=frame.index)).where(frame[target_col].notna()).round(3)
+
+
+def _cross_sectional_percentile(frame: pd.DataFrame, target_col: str) -> pd.Series:
+    """Per-date percentile rank (0-1) of target among all columns (incl. target)."""
+    target = frame[target_col]
+    others = frame
+    count_below = others.lt(target, axis=0).sum(axis=1)
+    valid = others.notna().sum(axis=1)
+    pct = (count_below / valid.replace(0, np.nan)).where(valid >= 2)
+    return pct.where(target.notna()).round(3)
 
 
 # Column names for ML model

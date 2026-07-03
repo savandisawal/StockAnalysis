@@ -1,0 +1,46 @@
+services:
+  api:
+    build: .
+    image: stock-quant-app
+    env_file: .env           # host-only, gitignored — never baked into the image
+    environment:
+      TZ: Asia/Kolkata       # APScheduler cron correctness
+      DATA_DIR: /data
+    volumes:
+      - appdata:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  ui:
+    image: stock-quant-app
+    command: >
+      streamlit run ui_streamlit/Home.py
+      --server.address 0.0.0.0 --server.port 8501
+    env_file: .env
+    environment:
+      TZ: Asia/Kolkata
+      DATA_DIR: /data
+    volumes:
+      - appdata:/data          # shared SQLite (WAL) + model bundles with api
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  appdata:

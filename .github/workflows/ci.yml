@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+defaults:
+  run:
+    working-directory: stock_quant_app
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: stock_quant_app/requirements.lock
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: stock_quant_app/requirements.lock
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Unit tests (offline)
+        run: pytest -m "not slow" -q
+
+  smoke-train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: stock_quant_app/requirements.lock
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Smoke train + leakage regression (deterministic, offline)
+        run: pytest tests/test_smoke_train.py tests/test_leakage.py -q
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        working-directory: .
+        run: docker build -f stock_quant_app/Dockerfile stock_quant_app

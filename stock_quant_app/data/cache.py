@@ -8,17 +8,20 @@ import json
 import sqlite3
 import time
 from io import StringIO
+from pathlib import Path
 
 import pandas as pd
 
-from app.config import PROJECT_ROOT
+from app.config import settings
 
-_CACHE_DB = PROJECT_ROOT / "cache.db"
+
+def _cache_db() -> Path:
+    return settings.cache_db_path
 
 
 def _get_conn() -> sqlite3.Connection:
     try:
-        conn = sqlite3.connect(str(_CACHE_DB), timeout=5)
+        conn = sqlite3.connect(str(_cache_db()), timeout=5)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             """
@@ -33,8 +36,8 @@ def _get_conn() -> sqlite3.Connection:
         return conn
     except sqlite3.DatabaseError:
         # Corrupt DB — delete and recreate
-        _CACHE_DB.unlink(missing_ok=True)
-        conn = sqlite3.connect(str(_CACHE_DB), timeout=5)
+        _cache_db().unlink(missing_ok=True)
+        conn = sqlite3.connect(str(_cache_db()), timeout=5)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             """

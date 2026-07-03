@@ -6,6 +6,7 @@ Run: streamlit run ui_streamlit/Home.py
 import sys
 from datetime import date
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
@@ -19,8 +20,13 @@ st.set_page_config(
 )
 
 from ui_streamlit.components.styles import (
-    inject_global_css, styled_header, metric_card, confidence_badge,
-    prediction_range_card, section_header, COLORS,
+    inject_global_css,
+    styled_header,
+    metric_card,
+    confidence_badge,
+    prediction_range_card,
+    section_header,
+    COLORS,
 )
 from data.cache import get_json, set_json
 from data.fetch_ohlc import fetch_ohlc
@@ -29,7 +35,11 @@ from model.predict import predict_next_day
 from model.train_model import train_quantile_models, get_feature_importance
 from ui_streamlit.components.charts import candlestick_chart
 from utils.sectors import (
-    SECTOR_STOCKS, get_sector, get_company_name, get_all_tickers, get_all_sectors,
+    SECTOR_STOCKS,
+    get_sector,
+    get_company_name,
+    get_all_tickers,
+    get_all_sectors,
 )
 
 _HISTORY_KEY = "ui:search_history"
@@ -60,7 +70,10 @@ if "search_history" not in st.session_state:
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.markdown('<div style="text-align:center;padding:16px 0 8px 0"><div style="font-size:2rem;margin-bottom:4px">Q</div><div style="font-size:1.2rem;font-weight:800;background:linear-gradient(90deg,#6C63FF,#00D4AA);-webkit-background-clip:text;-webkit-text-fill-color:transparent">STOCK QUANT</div><div style="color:#78909C;font-size:0.75rem;margin-top:2px">NSE India Price Predictor</div></div>', unsafe_allow_html=True)
+st.sidebar.markdown(
+    '<div style="text-align:center;padding:16px 0 8px 0"><div style="font-size:2rem;margin-bottom:4px">Q</div><div style="font-size:1.2rem;font-weight:800;background:linear-gradient(90deg,#6C63FF,#00D4AA);-webkit-background-clip:text;-webkit-text-fill-color:transparent">STOCK QUANT</div><div style="color:#78909C;font-size:0.75rem;margin-top:2px">NSE India Price Predictor</div></div>',
+    unsafe_allow_html=True,
+)
 st.sidebar.divider()
 
 # Stock selection — sector filter + searchable dropdown + custom input
@@ -69,7 +82,9 @@ st.sidebar.markdown("**Select Stock**")
 # Sector filter
 all_sectors = ["All Sectors"] + get_all_sectors()
 selected_sector = st.sidebar.selectbox(
-    "Filter by Sector", options=all_sectors, label_visibility="collapsed",
+    "Filter by Sector",
+    options=all_sectors,
+    label_visibility="collapsed",
 )
 
 # Build filtered options with company names
@@ -86,18 +101,23 @@ default_display = f"RELIANCE — {get_company_name('RELIANCE')}"
 default_idx = display_options.index(default_display) if default_display in display_options else 0
 
 selected_display = st.sidebar.selectbox(
-    "Stock", options=display_options, index=default_idx, label_visibility="collapsed",
+    "Stock",
+    options=display_options,
+    index=default_idx,
+    label_visibility="collapsed",
 )
 selected_ticker = ticker_map[selected_display]
 
 # Custom ticker input
 st.sidebar.markdown(
     '<div style="color:#78909C;font-size:0.75rem;margin:-8px 0 4px 0">'
-    'Or enter any NSE ticker:</div>',
+    "Or enter any NSE ticker:</div>",
     unsafe_allow_html=True,
 )
 custom_ticker = st.sidebar.text_input(
-    "Custom ticker", value="", placeholder="e.g. ZOMATO, PAYTM",
+    "Custom ticker",
+    value="",
+    placeholder="e.g. ZOMATO, PAYTM",
     label_visibility="collapsed",
 )
 if custom_ticker.strip():
@@ -108,7 +128,10 @@ st.session_state["selected_ticker"] = selected_ticker
 sector = get_sector(selected_ticker)
 company = get_company_name(selected_ticker)
 if sector:
-    st.sidebar.markdown(f'<div style="background:rgba(108,99,255,0.08);border:1px solid rgba(108,99,255,0.19);border-radius:8px;padding:8px 12px;text-align:center;margin:8px 0"><span style="color:#9E9E9E;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px">Sector</span><br><span style="color:#BB86FC;font-weight:600">{sector}</span></div>', unsafe_allow_html=True)
+    st.sidebar.markdown(
+        f'<div style="background:rgba(108,99,255,0.08);border:1px solid rgba(108,99,255,0.19);border-radius:8px;padding:8px 12px;text-align:center;margin:8px 0"><span style="color:#9E9E9E;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px">Sector</span><br><span style="color:#BB86FC;font-weight:600">{sector}</span></div>',
+        unsafe_allow_html=True,
+    )
 
 st.sidebar.divider()
 st.sidebar.markdown("**Model Controls**")
@@ -125,13 +148,17 @@ _already_trained = selected_ticker in _today_trained
 _limit_reached = len(_today_trained) >= _MAX_TRAINS_PER_DAY
 
 if _limit_reached:
-    st.sidebar.warning(f"Daily limit reached — {_MAX_TRAINS_PER_DAY} stocks trained today.", icon="🚫")
+    st.sidebar.warning(
+        f"Daily limit reached — {_MAX_TRAINS_PER_DAY} stocks trained today.", icon="🚫"
+    )
 elif _already_trained:
     st.sidebar.info(f"{selected_ticker} already trained today.", icon="✅")
 
 _train_disabled = _already_trained or _limit_reached
 
-if st.sidebar.button("Train Model", type="primary", use_container_width=True, disabled=_train_disabled):
+if st.sidebar.button(
+    "Train Model", type="primary", use_container_width=True, disabled=_train_disabled
+):
     # Re-read from cache at click time — guards against stale UI state
     _trained_now = get_json(_TRAIN_LIMIT_KEY, ttl=_TRAIN_LIMIT_TTL) or []
     if selected_ticker in _trained_now:
@@ -143,7 +170,8 @@ if st.sidebar.button("Train Model", type="primary", use_container_width=True, di
             st.write("Fetching data & computing features...")
             try:
                 models, features, metrics = train_quantile_models(
-                    selected_ticker, years=train_years,
+                    selected_ticker,
+                    years=train_years,
                     include_fundamentals=use_fundamentals,
                     include_macro=use_macro,
                 )
@@ -161,8 +189,11 @@ except Exception:
     existing_models = []
 
 if existing_models:
-    ts = existing_models[0].get('timestamp', '')[:8]
-    st.sidebar.markdown(f'<div style="background:rgba(0,230,118,0.08);border:1px solid rgba(0,230,118,0.19);border-radius:8px;padding:8px 12px;margin-top:8px"><span style="color:#00E676;font-size:0.8rem">Model ready</span><span style="color:#78909C;font-size:0.7rem"> | {ts}</span></div>', unsafe_allow_html=True)
+    ts = existing_models[0].get("timestamp", "")[:8]
+    st.sidebar.markdown(
+        f'<div style="background:rgba(0,230,118,0.08);border:1px solid rgba(0,230,118,0.19);border-radius:8px;padding:8px 12px;margin-top:8px"><span style="color:#00E676;font-size:0.8rem">Model ready</span><span style="color:#78909C;font-size:0.7rem"> | {ts}</span></div>',
+        unsafe_allow_html=True,
+    )
 else:
     st.sidebar.warning("No model trained yet")
 
@@ -215,7 +246,12 @@ if existing_models:
             section_header("Next-Day Prediction")
             p_left, p_right = st.columns([3, 1])
             with p_left:
-                prediction_range_card(pred.predicted_low, pred.predicted_mid, pred.predicted_high, pred.predicted_change_pct)
+                prediction_range_card(
+                    pred.predicted_low,
+                    pred.predicted_mid,
+                    pred.predicted_high,
+                    pred.predicted_change_pct,
+                )
             with p_right:
                 confidence_badge(pred.confidence, pred.direction)
 
@@ -230,7 +266,9 @@ if existing_models:
                     else:
                         st.info(f"{icon} {w.message}")
                 if pred.guardrail_applied:
-                    st.caption(f"Original predicted change: {pred.original_change_pct:+.2f}% (capped by guardrail)")
+                    st.caption(
+                        f"Original predicted change: {pred.original_change_pct:+.2f}% (capped by guardrail)"
+                    )
     except Exception as e:
         st.caption(f"Prediction unavailable: {e}")
 
@@ -242,17 +280,22 @@ if pred:
 
     # Signal Summary Table
     from model.predict import get_signal_summary
+
     signals = get_signal_summary(selected_ticker)
     if signals:
         with st.expander("Signal Summary", expanded=True):
             sig_df = pd.DataFrame(signals)
+
             # Color-code sentiment column
             def _color_sentiment(val):
                 colors = {"Bullish": "#00E676", "Bearish": "#FF5252", "Neutral": "#FFD740"}
                 return f"color: {colors.get(val, '#C0C0C0')}"
+
             styled_df = sig_df.style.map(_color_sentiment, subset=["sentiment"])
             st.dataframe(
-                styled_df, use_container_width=True, hide_index=True,
+                styled_df,
+                use_container_width=True,
+                hide_index=True,
                 column_config={
                     "signal": st.column_config.TextColumn("Signal", width="medium"),
                     "value": st.column_config.TextColumn("Value", width="small"),
@@ -270,7 +313,7 @@ if pred:
                 f'<span style="color:#00E676;font-weight:600">{bull_count} Bullish</span>'
                 f'<span style="color:#FFD740;font-weight:600">{neut_count} Neutral</span>'
                 f'<span style="color:#FF5252;font-weight:600">{bear_count} Bearish</span>'
-                f'</div>',
+                f"</div>",
                 unsafe_allow_html=True,
             )
 
@@ -279,13 +322,31 @@ if pred:
         with st.expander("Feature Importance"):
             try:
                 from model.model_registry import load_model_bundle
+
                 bundle = load_model_bundle(selected_ticker)
                 if bundle:
                     models_loaded, feat_names, meta = bundle
                     imp = get_feature_importance(models_loaded, feat_names, top_n=15)
                     import plotly.express as px
-                    fig = px.bar(imp, x="importance", y="feature", orientation="h", color="importance", color_continuous_scale=["#6C63FF", "#00D4AA"])
-                    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(14,17,23,0.8)", font=dict(color="#C0C0C0"), yaxis=dict(autorange="reversed", gridcolor="#1E2028"), xaxis=dict(gridcolor="#1E2028"), coloraxis_showscale=False, height=400, margin=dict(l=120, r=20, t=20, b=20))
+
+                    fig = px.bar(
+                        imp,
+                        x="importance",
+                        y="feature",
+                        orientation="h",
+                        color="importance",
+                        color_continuous_scale=["#6C63FF", "#00D4AA"],
+                    )
+                    fig.update_layout(
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(14,17,23,0.8)",
+                        font=dict(color="#C0C0C0"),
+                        yaxis=dict(autorange="reversed", gridcolor="#1E2028"),
+                        xaxis=dict(gridcolor="#1E2028"),
+                        coloraxis_showscale=False,
+                        height=400,
+                        margin=dict(l=120, r=20, t=20, b=20),
+                    )
                     st.plotly_chart(fig, use_container_width=True)
             except Exception:
                 st.caption("Train a model to see feature importance.")
@@ -295,13 +356,13 @@ if pred:
         st.markdown(
             f'<div style="background:rgba(108,99,255,0.06);border:1px solid rgba(108,99,255,0.15);border-radius:12px;padding:16px">'
             f'<div style="font-size:0.85rem;color:#C0C0C0;line-height:1.7">'
-            f'<b>Confidence: {pred.confidence}%</b><br>'
-            f'Predicted range width: <b>{pred.range_width_pct:.2f}%</b> (P10 to P90)<br>'
-            f'Direction: <b>{pred.direction}</b> (median change: {pred.predicted_change_pct:+.3f}%)<br><br>'
+            f"<b>Confidence: {pred.confidence}%</b><br>"
+            f"Predicted range width: <b>{pred.range_width_pct:.2f}%</b> (P10 to P90)<br>"
+            f"Direction: <b>{pred.direction}</b> (median change: {pred.predicted_change_pct:+.3f}%)<br><br>"
             f'<span style="color:#78909C">Confidence is derived from how narrow the prediction range is '
-            f'relative to the stock\'s typical daily volatility (ATR). A narrow range means the model '
-            f'is more certain about tomorrow\'s price action.</span>'
-            f'</div></div>',
+            f"relative to the stock's typical daily volatility (ATR). A narrow range means the model "
+            f"is more certain about tomorrow's price action.</span>"
+            f"</div></div>",
             unsafe_allow_html=True,
         )
 
@@ -311,12 +372,15 @@ st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 with st.expander("Corporate Actions & Filings"):
     try:
         from data.fetch_corporate import fetch_corporate_announcements
+
         filings = fetch_corporate_announcements(selected_ticker, days=30)
         if filings.announcements:
             display_data = filings.to_display_list(max_items=15)
             filings_df = pd.DataFrame(display_data)
             st.dataframe(
-                filings_df, use_container_width=True, hide_index=True,
+                filings_df,
+                use_container_width=True,
+                hide_index=True,
                 column_config={
                     "Date": st.column_config.TextColumn("Date", width="small"),
                     "Category": st.column_config.TextColumn("Category", width="medium"),
@@ -325,7 +389,9 @@ with st.expander("Corporate Actions & Filings"):
                 },
             )
             imp_count = len(filings.important_announcements())
-            st.caption(f"{filings.total_count} announcements in last 30 days ({imp_count} material)")
+            st.caption(
+                f"{filings.total_count} announcements in last 30 days ({imp_count} material)"
+            )
         else:
             st.caption("No corporate announcements found in the last 30 days.")
     except Exception as e:
@@ -338,6 +404,7 @@ with st.expander("Fundamentals Overview"):
     try:
         from data.fetch_fundamentals import fetch_fundamentals
         from features.fundamentals import compute_fundamental_features
+
         raw = fetch_fundamentals(selected_ticker)
         feat = compute_fundamental_features(selected_ticker)
 
@@ -355,7 +422,13 @@ with st.expander("Fundamentals Overview"):
                         pe_sub = "Cheap vs peers"
                     else:
                         pe_sub = "Fair vs peers"
-                pe_color = COLORS["bearish"] if (feat.pe_zscore or 0) > 0.5 else COLORS["bullish"] if (feat.pe_zscore or 0) < -0.5 else COLORS["primary"]
+                pe_color = (
+                    COLORS["bearish"]
+                    if (feat.pe_zscore or 0) > 0.5
+                    else COLORS["bullish"]
+                    if (feat.pe_zscore or 0) < -0.5
+                    else COLORS["primary"]
+                )
                 metric_card("PE Ratio", pe_val, pe_sub, pe_color)
 
             # ROE
@@ -369,7 +442,9 @@ with st.expander("Fundamentals Overview"):
                         roe_sub = "Above median"
                     else:
                         roe_sub = "Below median"
-                roe_color = COLORS["bullish"] if (feat.roe_percentile or 0) >= 0.5 else COLORS["warning"]
+                roe_color = (
+                    COLORS["bullish"] if (feat.roe_percentile or 0) >= 0.5 else COLORS["warning"]
+                )
                 metric_card("ROE", roe_val, roe_sub, roe_color)
 
             # Debt/Equity
@@ -383,14 +458,22 @@ with st.expander("Fundamentals Overview"):
                         de_sub = "Moderate debt"
                     else:
                         de_sub = "High debt vs peers"
-                de_color = COLORS["bullish"] if (feat.de_percentile or 0) >= 0.5 else COLORS["bearish"]
+                de_color = (
+                    COLORS["bullish"] if (feat.de_percentile or 0) >= 0.5 else COLORS["bearish"]
+                )
                 metric_card("Debt/Equity", de_val, de_sub, de_color)
 
             # EPS Growth
             with f4:
                 eps_val = f"{raw.eps_cagr_3y:+.1f}%" if raw.eps_cagr_3y is not None else "N/A"
                 if raw.eps_cagr_3y is not None:
-                    eps_color = COLORS["bullish"] if raw.eps_cagr_3y > 10 else COLORS["warning"] if raw.eps_cagr_3y > 0 else COLORS["bearish"]
+                    eps_color = (
+                        COLORS["bullish"]
+                        if raw.eps_cagr_3y > 10
+                        else COLORS["warning"]
+                        if raw.eps_cagr_3y > 0
+                        else COLORS["bearish"]
+                    )
                 else:
                     eps_color = COLORS["primary"]
                 metric_card("EPS CAGR 3Y", eps_val, color=eps_color)
@@ -401,7 +484,11 @@ with st.expander("Fundamentals Overview"):
                 prom_sub = ""
                 if raw.promoter_holding_change is not None:
                     prom_sub = f"{raw.promoter_holding_change:+.2f}% QoQ"
-                prom_color = COLORS["bullish"] if (raw.promoter_holding_change or 0) >= 0 else COLORS["bearish"]
+                prom_color = (
+                    COLORS["bullish"]
+                    if (raw.promoter_holding_change or 0) >= 0
+                    else COLORS["bearish"]
+                )
                 metric_card("Promoter", prom_val, prom_sub, prom_color)
 
             # Sector context
@@ -418,7 +505,7 @@ with st.expander("Fundamentals Overview"):
                     v_color = COLORS["primary"]
                 st.markdown(
                     f'<div style="background:{v_color}10;border-left:4px solid {v_color};'
-                    f'border-radius:0 10px 10px 0;padding:10px 16px;margin-top:12px;'
+                    f"border-radius:0 10px 10px 0;padding:10px 16px;margin-top:12px;"
                     f'color:{v_color};font-size:0.85rem">{verdict}</div>',
                     unsafe_allow_html=True,
                 )
@@ -463,7 +550,9 @@ section_header("Price Chart")
 chart_days = st.slider("Chart period (days)", 30, 365, 90, label_visibility="collapsed")
 chart_df = df.tail(chart_days)
 try:
-    fig = candlestick_chart(chart_df, prediction=prediction, title=f"{selected_ticker} - {chart_days}D")
+    fig = candlestick_chart(
+        chart_df, prediction=prediction, title=f"{selected_ticker} - {chart_days}D"
+    )
     st.plotly_chart(fig, use_container_width=True)
 except Exception as e:
     st.error(f"Chart rendering failed: {e}")

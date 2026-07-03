@@ -1,0 +1,30 @@
+.venv/
+.git/
+.github/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Never ship secrets or local state into the image
+.env
+.env.*
+.streamlit/secrets.toml
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+logs/
+model/saved_models/
+*.joblib
+*.pkl
+cache.db
+
+# Not needed at runtime
+tests/
+docs/
+Dockerfile
+docker-compose.yml
+.dockerignore
+.pre-commit-config.yaml

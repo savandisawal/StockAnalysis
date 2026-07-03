@@ -12,12 +12,13 @@ Tickers:
 import socket
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
+import pandas as pd
 import yfinance as yf
 
 from app.config import settings
-from data.cache import get_json, set_json
+from data.cache import get_dataframe, get_json, set_dataframe, set_json
 from utils.logger import logger
 
 # Set a global socket timeout so yfinance calls don't hang indefinitely
@@ -31,6 +32,19 @@ MACRO_TICKERS: dict[str, str] = {
     "Brent Crude": "BZ=F",
     "USD/INR": "USDINR=X",
     "India VIX": "^INDIAVIX",
+}
+
+# yfinance ticker → (feature column name, lag in trading days when joined
+# to the NSE calendar). US/overnight series get lag 1: a prediction made
+# after the NSE close on day t can only see the US session completed on
+# day t-1, so historical rows must carry the same information set.
+MACRO_HISTORY_MAP: dict[str, tuple[str, int]] = {
+    "^GSPC": ("sp500_change", 1),
+    "^IXIC": ("nasdaq_change", 1),
+    "BZ=F": ("brent_change", 1),
+    "^NSEI": ("nifty_change", 0),
+    "USDINR=X": ("usdinr_change", 0),
+    "^INDIAVIX": ("vix_value", 0),
 }
 
 
@@ -97,8 +111,11 @@ def _fetch_single_macro(name: str, ticker: str) -> MacroSnapshot:
 
     # All retries failed
     return MacroSnapshot(
-        name=name, ticker=ticker,
-        current_price=None, prev_close=None, change_pct=None,
+        name=name,
+        ticker=ticker,
+        current_price=None,
+        prev_close=None,
+        change_pct=None,
         fetch_date=today,
     )
 
@@ -125,18 +142,81 @@ def fetch_macro_snapshot(use_cache: bool = True) -> list[MacroSnapshot]:
 
     # Cache valid results
     if use_cache and any(s.is_valid for s in results):
-        set_json(cache_key, [
-            {
-                "name": s.name, "ticker": s.ticker,
-                "current_price": s.current_price, "prev_close": s.prev_close,
-                "change_pct": s.change_pct, "fetch_date": s.fetch_date,
-            }
-            for s in results
-        ])
+        set_json(
+            cache_key,
+            [
+                {
+                    "name": s.name,
+                    "ticker": s.ticker,
+                    "current_price": s.current_price,
+                    "prev_close": s.prev_close,
+                    "change_pct": s.change_pct,
+                    "fetch_date": s.fetch_date,
+                }
+                for s in results
+            ],
+        )
 
     valid_count = sum(1 for s in results if s.is_valid)
     logger.info(f"Macro snapshot: {valid_count}/{len(results)} indicators fetched")
     return results
+
+
+def fetch_macro_history_df(years: int = 4, use_cache: bool = True) -> pd.DataFrame:
+    """Fetch point-in-time daily % changes for all macro tickers.
+
+    Returns a DataFrame with a naive DatetimeIndex (dates) and one column
+    per feature name in MACRO_HISTORY_MAP. US/overnight series are already
+    shifted by their lag so a row at date t contains only information that
+    was observable before the NSE close on day t.
+
+    Used to build leakage-free historical macro features for training.
+    """
+    cache_key = f"macro:history_df:{years}"
+    if use_cache:
+        cached = get_dataframe(cache_key, settings.cache_ttl_ohlc)
+        if cached is not None and not cached.empty:
+            cached.index = pd.to_datetime(cached.index)
+            return cached
+
+    end = date.today() + timedelta(days=1)
+    start = end - timedelta(days=int(years * 365.25) + 30)
+
+    series: dict[str, pd.Series] = {}
+    for ticker, (feature, lag) in MACRO_HISTORY_MAP.items():
+        for attempt in range(1, settings.yfinance_max_retries + 1):
+            try:
+                hist = yf.Ticker(ticker).history(start=str(start), end=str(end))
+                if hist.empty or len(hist) < 2:
+                    raise ValueError("empty history")
+                close = hist["Close"]
+                if close.index.tz is not None:
+                    close.index = close.index.tz_localize(None)
+                close.index = close.index.normalize()
+                close = close[~close.index.duplicated(keep="last")]
+                pct = (close.pct_change() * 100).round(4)
+                if lag:
+                    pct = pct.shift(lag)
+                series[feature] = pct
+                break
+            except Exception as e:
+                logger.warning(f"Macro history fetch failed for {ticker} (attempt {attempt}): {e}")
+                if attempt < settings.yfinance_max_retries:
+                    time.sleep(settings.yfinance_retry_delay)
+        time.sleep(0.3)  # Rate limiting
+
+    if not series:
+        logger.error("No macro history could be fetched")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(series).sort_index()
+    # Union calendar across markets — forward-fill so NSE trading days that
+    # are US holidays carry the last observed US value (same as live behavior).
+    df = df.ffill()
+
+    if use_cache and not df.empty:
+        set_dataframe(cache_key, df)
+    return df
 
 
 def fetch_macro_history(days: int = 60) -> dict[str, list[float]]:

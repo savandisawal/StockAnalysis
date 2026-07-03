@@ -29,6 +29,8 @@ def save_model_bundle(
     models: dict[str, object],
     feature_names: list[str],
     metrics: dict | None = None,
+    conformal: dict | None = None,
+    feature_stats: dict | None = None,
 ) -> str:
     """Save a set of quantile models (P10/P50/P90) as a versioned bundle.
 
@@ -36,7 +38,9 @@ def save_model_bundle(
         ticker: Stock ticker this model was trained for.
         models: {"p10": model, "p50": model, "p90": model}
         feature_names: Ordered list of feature column names.
-        metrics: Optional backtest metrics to store with the model.
+        metrics: Optional training/backtest metrics to store with the model.
+        conformal: CQR offsets computed on the calibration window.
+        feature_stats: Per-feature training distribution stats (drift checks).
 
     Returns:
         Model version string (e.g. "RELIANCE_20260326_a1b2c3d4")
@@ -54,13 +58,16 @@ def save_model_bundle(
         model_path = bundle_dir / f"model_{quantile_name}.joblib"
         joblib.dump(model, model_path)
 
-    # Save metadata
+    # Save metadata (schema_version 2 adds conformal + feature_stats)
     metadata = {
+        "schema_version": 2,
         "ticker": clean_ticker,
         "timestamp": timestamp,
         "feature_names": feature_names,
         "quantiles": list(models.keys()),
         "metrics": metrics or {},
+        "conformal": conformal,
+        "feature_stats": feature_stats,
     }
 
     meta_path = bundle_dir / "metadata.json"

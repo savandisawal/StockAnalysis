@@ -7,6 +7,7 @@ model load, inference, and result formatting.
 from model.backtest import get_backtest_history, get_backtest_summary, run_backtest
 from model.predict import PredictionResult, predict_next_day
 from model.train_model import get_feature_importance, train_quantile_models
+from services.prediction_store import get_live_accuracy, get_live_history, save_prediction
 from utils.logger import logger
 
 
@@ -14,13 +15,21 @@ def get_prediction(
     ticker: str,
     include_fundamentals: bool = True,
     include_macro: bool = True,
+    source: str = "api",
 ) -> PredictionResult | None:
-    """Get next-day prediction for a stock. Uses latest trained model."""
-    return predict_next_day(
+    """Get next-day prediction for a stock. Uses latest trained model.
+
+    Every served prediction is persisted with full provenance so real
+    accuracy can be tracked once the outcome is known.
+    """
+    result = predict_next_day(
         ticker,
         include_fundamentals=include_fundamentals,
         include_macro=include_macro,
     )
+    if result is not None:
+        save_prediction(result, source=source)
+    return result
 
 
 def train_model(
@@ -32,7 +41,8 @@ def train_model(
     """Train a new model for a stock and return metrics."""
     try:
         models, features, metrics = train_quantile_models(
-            ticker, years=years,
+            ticker,
+            years=years,
             include_fundamentals=include_fundamentals,
             include_macro=include_macro,
         )
@@ -48,13 +58,14 @@ def train_model(
 def run_stock_backtest(
     ticker: str,
     years: int = 3,
-    include_fundamentals: bool = False,
-    include_macro: bool = False,
+    include_fundamentals: bool = True,
+    include_macro: bool = True,
 ) -> dict:
     """Run backtest for a stock and return metrics."""
     try:
         metrics = run_backtest(
-            ticker, years=years,
+            ticker,
+            years=years,
             include_fundamentals=include_fundamentals,
             include_macro=include_macro,
         )
@@ -75,3 +86,16 @@ def get_prediction_history(ticker: str, limit: int = 500) -> list[dict]:
 def get_all_backtest_summaries() -> list[dict]:
     """Get latest backtest summaries for all tickers."""
     return get_backtest_summary()
+
+
+def get_live_prediction_history(ticker: str, limit: int = 250) -> list[dict]:
+    """Served (real) prediction history with outcomes where resolved."""
+    df = get_live_history(ticker, limit=limit)
+    if df.empty:
+        return []
+    return df.to_dict(orient="records")
+
+
+def get_live_accuracy_summary(ticker: str | None = None, window: int = 60) -> list[dict]:
+    """Live accuracy metrics computed from served predictions."""
+    return get_live_accuracy(ticker=ticker, window=window)

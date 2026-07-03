@@ -109,9 +109,7 @@ class TestTrain:
             "interval_coverage_80": 0.75,
         }
         with patch("app.main.train_model", return_value=mock_metrics):
-            resp = client.post(
-                "/train/RELIANCE?years=2", headers=VALID_AUTH
-            )
+            resp = client.post("/train/RELIANCE?years=2", headers=VALID_AUTH)
             assert resp.status_code == 200
             assert resp.json()["direction_accuracy"] == 0.58
 
@@ -138,12 +136,8 @@ class TestBacktest:
             "mae": 0.45,
             "direction_accuracy": 0.56,
         }
-        with patch(
-            "app.main.run_stock_backtest", return_value=mock_metrics
-        ):
-            resp = client.post(
-                "/backtest/RELIANCE?years=2", headers=VALID_AUTH
-            )
+        with patch("app.main.run_stock_backtest", return_value=mock_metrics):
+            resp = client.post("/backtest/RELIANCE?years=2", headers=VALID_AUTH)
             assert resp.status_code == 200
             assert resp.json()["mae"] == 0.45
 
@@ -156,12 +150,8 @@ class TestBacktest:
             assert resp.status_code == 500
 
     def test_backtest_history(self):
-        with patch(
-            "app.main.get_prediction_history", return_value=[]
-        ):
-            resp = client.get(
-                "/backtest/RELIANCE/history", headers=VALID_AUTH
-            )
+        with patch("app.main.get_prediction_history", return_value=[]):
+            resp = client.get("/backtest/RELIANCE/history", headers=VALID_AUTH)
             assert resp.status_code == 200
             assert resp.json() == {"predictions": []}
 
@@ -200,9 +190,7 @@ class TestMacro:
         mock_snap.prev_close = 5180.0
         mock_snap.change_pct = 0.39
         mock_snap.fetch_date = "2026-03-27"
-        with patch(
-            "app.main.fetch_macro_snapshot", return_value=[mock_snap]
-        ):
+        with patch("app.main.fetch_macro_snapshot", return_value=[mock_snap]):
             resp = client.get("/macro", headers=VALID_AUTH)
             assert resp.status_code == 200
             data = resp.json()["indicators"]

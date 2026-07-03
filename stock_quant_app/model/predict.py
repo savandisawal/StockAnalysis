@@ -12,51 +12,57 @@ Includes prediction safeguards:
 - Ensemble sanity: flag illogical P10/P50/P90 ordering
 """
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
 
 from features.feature_builder import build_features_for_prediction
+from model.conformal import apply_conformal
+from model.explain import compute_shap_explanation
 from model.model_registry import load_model_bundle
 from utils.logger import logger
 
 # ── Safeguard thresholds ────────────────────────────────────────
 
-_ATR_CAP_MULTIPLIER = 2.0    # Max predicted change = 2x ATR
-_STALENESS_DAYS = 7           # Warn if model older than this
-_VIX_CIRCUIT_BREAKER = 30.0   # Refuse prediction above this VIX
-_VOLUME_Z_CIRCUIT = 4.0       # Refuse on extreme volume anomaly
-_DRIFT_ZSCORE_THRESHOLD = 3.0 # Flag features > 3 std from mean
-_DRIFT_MAX_FLAGS = 3          # Max drifted features before warning
+_ATR_CAP_MULTIPLIER = 2.0  # Max predicted change = 2x ATR
+_STALENESS_DAYS = 7  # Warn if model older than this
+_VIX_CIRCUIT_BREAKER = 30.0  # Refuse prediction above this VIX
+_VOLUME_Z_CIRCUIT = 4.0  # Refuse on extreme volume anomaly
+_DRIFT_ZSCORE_THRESHOLD = 3.0  # Flag features > 3 std from mean
+_DRIFT_MAX_FLAGS = 3  # Max drifted features before warning
 
 
 @dataclass
 class PredictionWarning:
     """A single warning/safeguard flag."""
-    level: str    # "info", "warning", "critical"
-    code: str     # machine-readable: "guardrail", "stale", etc.
+
+    level: str  # "info", "warning", "critical"
+    code: str  # machine-readable: "guardrail", "stale", etc.
     message: str  # human-readable explanation
 
 
 @dataclass
 class PredictionResult:
     """Next-day price range prediction with confidence."""
+
     ticker: str
-    prediction_date: str        # Date the prediction is for
-    current_close: float        # Today's closing price
+    prediction_date: str  # Date the prediction is for
+    current_close: float  # Today's closing price
 
-    predicted_low: float        # P10 — lower bound of range
-    predicted_mid: float        # P50 — median prediction
-    predicted_high: float       # P90 — upper bound of range
+    predicted_low: float  # P10 — lower bound of range
+    predicted_mid: float  # P50 — median prediction
+    predicted_high: float  # P90 — upper bound of range
 
-    predicted_change_pct: float # P50 % change from current close
-    range_width_pct: float      # (P90 - P10) / close as %
+    predicted_change_pct: float  # P50 % change from current close
+    range_width_pct: float  # (P90 - P10) / close as %
 
-    confidence: float           # 0-100 scale, derived from range width
-    direction: str              # "Bullish", "Bearish", or "Neutral"
+    confidence: float  # 0-100 scale, derived from range width
+    direction: str  # "Bullish", "Bearish", or "Neutral"
 
-    model_version: str          # Which model made this prediction
+    model_version: str  # Which model made this prediction
 
     # Safeguard outputs
     warnings: list[PredictionWarning] = field(
@@ -64,6 +70,11 @@ class PredictionResult:
     )
     guardrail_applied: bool = False  # True if prediction was capped
     original_change_pct: float | None = None  # Pre-guardrail value
+
+    # Explainability + provenance
+    explanation: dict | None = None  # SHAP top contributors (P50 model)
+    features: dict | None = None  # Full input vector (persisted, not in API payload)
+    features_hash: str = ""  # sha256[:16] of canonical features JSON
 
     def to_dict(self) -> dict:
         return {
@@ -79,9 +90,10 @@ class PredictionResult:
             "direction": self.direction,
             "model_version": self.model_version,
             "guardrail_applied": self.guardrail_applied,
+            "explanation": self.explanation,
+            "features_hash": self.features_hash,
             "warnings": [
-                {"level": w.level, "code": w.code, "message": w.message}
-                for w in self.warnings
+                {"level": w.level, "code": w.code, "message": w.message} for w in self.warnings
             ],
         }
 
@@ -111,10 +123,7 @@ def _check_model_staleness(
             return PredictionWarning(
                 level="warning",
                 code="stale_model",
-                message=(
-                    f"Model is {age_days} days old. "
-                    f"Retrain for better accuracy."
-                ),
+                message=(f"Model is {age_days} days old. Retrain for better accuracy."),
             )
     except ValueError:
         pass
@@ -130,10 +139,7 @@ def _check_circuit_breakers(
         return PredictionWarning(
             level="critical",
             code="circuit_breaker_vix",
-            message=(
-                f"India VIX change {vix:+.1f}% — extreme volatility. "
-                f"Prediction unreliable."
-            ),
+            message=(f"India VIX change {vix:+.1f}% — extreme volatility. Prediction unreliable."),
         )
 
     vol_z = features.get("volume_zscore")
@@ -142,8 +148,7 @@ def _check_circuit_breakers(
             level="critical",
             code="circuit_breaker_volume",
             message=(
-                f"Volume Z-score {vol_z:.1f} — extreme anomaly. "
-                f"Prediction may be unreliable."
+                f"Volume Z-score {vol_z:.1f} — extreme anomaly. Prediction may be unreliable."
             ),
         )
 
@@ -154,28 +159,47 @@ def _check_feature_drift(
     features: dict[str, float],
     metadata: dict,
 ) -> PredictionWarning | None:
-    """Flag when input features are far outside training distribution."""
-    # Heuristic bounds for common features
+    """Flag when input features are far outside the training distribution.
+
+    Prefers the per-feature training stats stored in the model bundle
+    (schema_version >= 2): flags |z| > 3 or values outside the training
+    [p01, p99] band. Falls back to hardcoded heuristic bounds for old
+    bundles without feature_stats.
+    """
     drift_flags = []
-    bounds = {
-        "rsi_14": (5, 95),
-        "bb_pct_b": (-0.5, 1.5),
-        "volume_zscore": (-3, 5),
-        "adx_14": (0, 80),
-        "return_1d": (-10, 10),
-        "return_5d": (-20, 20),
-    }
-    for feat, (lo, hi) in bounds.items():
-        val = features.get(feat)
-        if val is not None and (val < lo or val > hi):
-            drift_flags.append(feat)
+
+    feature_stats = metadata.get("feature_stats") or {}
+    if feature_stats:
+        for feat, stats in feature_stats.items():
+            val = features.get(feat)
+            if val is None:
+                continue
+            std = stats.get("std", 0)
+            z = abs(val - stats.get("mean", 0)) / std if std > 0 else 0.0
+            outside_band = val < stats.get("p01", -np.inf) or val > stats.get("p99", np.inf)
+            if z > _DRIFT_ZSCORE_THRESHOLD or outside_band:
+                drift_flags.append(feat)
+    else:
+        # Fallback heuristic bounds for pre-v2 bundles
+        bounds = {
+            "rsi_14": (5, 95),
+            "bb_pct_b": (-0.5, 1.5),
+            "volume_zscore": (-3, 5),
+            "adx_14": (0, 80),
+            "return_1d": (-10, 10),
+            "return_5d": (-20, 20),
+        }
+        for feat, (lo, hi) in bounds.items():
+            val = features.get(feat)
+            if val is not None and (val < lo or val > hi):
+                drift_flags.append(feat)
 
     if len(drift_flags) >= _DRIFT_MAX_FLAGS:
         return PredictionWarning(
             level="warning",
             code="feature_drift",
             message=(
-                f"{len(drift_flags)} features outside normal range "
+                f"{len(drift_flags)} features outside training distribution "
                 f"({', '.join(drift_flags[:4])}). "
                 f"Model may not generalize well."
             ),
@@ -184,7 +208,10 @@ def _check_feature_drift(
 
 
 def _apply_guardrails(
-    p10: float, p50: float, p90: float, atr_pct: float,
+    p10: float,
+    p50: float,
+    p90: float,
+    atr_pct: float,
 ) -> tuple[float, float, float, bool, float | None]:
     """Cap predicted changes at 2x ATR. Returns capped values + flag."""
     cap = atr_pct * _ATR_CAP_MULTIPLIER
@@ -208,7 +235,9 @@ def _apply_guardrails(
 
 
 def _check_ensemble_sanity(
-    p10_raw: float, p50_raw: float, p90_raw: float,
+    p10_raw: float,
+    p50_raw: float,
+    p90_raw: float,
 ) -> PredictionWarning | None:
     """Flag if quantile models produce illogical results."""
     spread = p90_raw - p10_raw
@@ -228,10 +257,7 @@ def _check_ensemble_sanity(
         return PredictionWarning(
             level="warning",
             code="ensemble_wide_spread",
-            message=(
-                f"Prediction range is very wide ({spread:.1f}%). "
-                f"Model is highly uncertain."
-            ),
+            message=(f"Prediction range is very wide ({spread:.1f}%). Model is highly uncertain."),
         )
     return None
 
@@ -243,6 +269,7 @@ def _calibrate_confidence(
     """Adjust confidence based on backtest accuracy if available."""
     try:
         from model.backtest import get_backtest_summary
+
         summaries = get_backtest_summary(ticker)
         if not summaries:
             return confidence, None
@@ -382,25 +409,42 @@ def predict_next_day(
     if ensemble_warn:
         warnings.append(ensemble_warn)
 
+    # ── CQR conformal calibration ────────────────────────────
+    conformal = metadata.get("conformal")
+    if not conformal:
+        warnings.append(
+            PredictionWarning(
+                level="info",
+                code="uncalibrated_model",
+                message=(
+                    "Model bundle predates conformal calibration — interval "
+                    "coverage is not statistically guaranteed. Retrain to fix."
+                ),
+            )
+        )
+    p10_cal, p50_cal, p90_cal = apply_conformal(p10_raw, p50_raw, p90_raw, conformal)
+
     # Sort to ensure ordering
     p10_change, p50_change, p90_change = sorted(
-        [p10_raw, p50_raw, p90_raw],
+        [p10_cal, p50_cal, p90_cal],
     )
 
     # ── Safeguard 5: Guardrails — cap at 2x ATR ────────────
-    p10_change, p50_change, p90_change, guardrail_hit, orig_p50 = (
-        _apply_guardrails(p10_change, p50_change, p90_change, atr_pct)
+    p10_change, p50_change, p90_change, guardrail_hit, orig_p50 = _apply_guardrails(
+        p10_change, p50_change, p90_change, atr_pct
     )
     if guardrail_hit:
-        warnings.append(PredictionWarning(
-            level="info",
-            code="guardrail",
-            message=(
-                f"Predicted change capped from "
-                f"{orig_p50:+.2f}% to {p50_change:+.2f}% "
-                f"(2x ATR limit: {atr_pct * _ATR_CAP_MULTIPLIER:.2f}%)."
-            ),
-        ))
+        warnings.append(
+            PredictionWarning(
+                level="info",
+                code="guardrail",
+                message=(
+                    f"Predicted change capped from "
+                    f"{orig_p50:+.2f}% to {p50_change:+.2f}% "
+                    f"(2x ATR limit: {atr_pct * _ATR_CAP_MULTIPLIER:.2f}%)."
+                ),
+            )
+        )
 
     # Convert % changes to price levels
     predicted_low = round(current_close * (1 + p10_change / 100), 2)
@@ -421,7 +465,15 @@ def predict_next_day(
         confidence = round(confidence * 0.7, 1)
 
     from utils.holidays import next_trading_day
+
     pred_date = next_trading_day().isoformat()
+
+    # SHAP explanation for the P50 model — never blocks a prediction
+    explanation = compute_shap_explanation(models["p50"], X, feature_names)
+
+    features_hash = hashlib.sha256(
+        json.dumps(features, sort_keys=True, default=float).encode()
+    ).hexdigest()[:16]
 
     result = PredictionResult(
         ticker=clean_ticker,
@@ -438,6 +490,9 @@ def predict_next_day(
         warnings=warnings,
         guardrail_applied=guardrail_hit,
         original_change_pct=orig_p50,
+        explanation=explanation,
+        features=dict(features),
+        features_hash=features_hash,
     )
 
     # Log warnings
@@ -445,7 +500,19 @@ def predict_next_day(
         log_fn = logger.warning if w.level != "info" else logger.info
         log_fn(f"[{w.code}] {w.message}")
 
-    logger.info(
+    # One structured event per served prediction (JSON sink keys on extra)
+    logger.bind(
+        event="prediction",
+        ticker=result.ticker,
+        prediction_date=result.prediction_date,
+        model_version=version,
+        features_hash=features_hash,
+        p10=round(p10_change, 4),
+        p50=round(p50_change, 4),
+        p90=round(p90_change, 4),
+        confidence=confidence,
+        warning_codes=[w.code for w in warnings],
+    ).info(
         f"Prediction for {result.ticker}: "
         f"Rs.{result.predicted_low} - Rs.{result.predicted_mid} "
         f"- Rs.{result.predicted_high} "
@@ -488,49 +555,77 @@ def get_signal_summary(ticker: str) -> list[dict]:
     rsi = latest.get("rsi_14")
     if pd.notna(rsi):
         if rsi > 70:
-            signals.append(_sig(
-                "RSI (14)", f"{rsi:.1f}",
-                "Overbought — potential reversal down", "Bearish",
-            ))
+            signals.append(
+                _sig(
+                    "RSI (14)",
+                    f"{rsi:.1f}",
+                    "Overbought — potential reversal down",
+                    "Bearish",
+                )
+            )
         elif rsi < 30:
-            signals.append(_sig(
-                "RSI (14)", f"{rsi:.1f}",
-                "Oversold — potential reversal up", "Bullish",
-            ))
+            signals.append(
+                _sig(
+                    "RSI (14)",
+                    f"{rsi:.1f}",
+                    "Oversold — potential reversal up",
+                    "Bullish",
+                )
+            )
         else:
-            signals.append(_sig(
-                "RSI (14)", f"{rsi:.1f}",
-                "Neutral zone", "Neutral",
-            ))
+            signals.append(
+                _sig(
+                    "RSI (14)",
+                    f"{rsi:.1f}",
+                    "Neutral zone",
+                    "Neutral",
+                )
+            )
 
     # MACD
     macd = latest.get("macd_hist_pct")
     if pd.notna(macd):
         sent = "Bullish" if macd > 0 else "Bearish"
         label = "Bullish" if macd > 0 else "Bearish"
-        signals.append(_sig(
-            "MACD Histogram", f"{macd:+.3f}%",
-            f"{label} momentum", sent,
-        ))
+        signals.append(
+            _sig(
+                "MACD Histogram",
+                f"{macd:+.3f}%",
+                f"{label} momentum",
+                sent,
+            )
+        )
 
     # Bollinger %B
     bb = latest.get("bb_pct_b")
     if pd.notna(bb):
         if bb > 0.8:
-            signals.append(_sig(
-                "Bollinger %B", f"{bb:.3f}",
-                "Near upper band — resistance", "Bearish",
-            ))
+            signals.append(
+                _sig(
+                    "Bollinger %B",
+                    f"{bb:.3f}",
+                    "Near upper band — resistance",
+                    "Bearish",
+                )
+            )
         elif bb < 0.2:
-            signals.append(_sig(
-                "Bollinger %B", f"{bb:.3f}",
-                "Near lower band — support", "Bullish",
-            ))
+            signals.append(
+                _sig(
+                    "Bollinger %B",
+                    f"{bb:.3f}",
+                    "Near lower band — support",
+                    "Bullish",
+                )
+            )
         else:
-            signals.append(_sig(
-                "Bollinger %B", f"{bb:.3f}",
-                "Mid-range", "Neutral",
-            ))
+            signals.append(
+                _sig(
+                    "Bollinger %B",
+                    f"{bb:.3f}",
+                    "Mid-range",
+                    "Neutral",
+                )
+            )
 
     # EMA positioning
     ema_cols = [
@@ -543,10 +638,14 @@ def get_signal_summary(ticker: str) -> list[dict]:
         if pd.notna(val):
             sent = "Bullish" if val > 0 else "Bearish"
             pos = "Above" if val > 0 else "Below"
-            signals.append(_sig(
-                ema_name, f"{val:+.2f}%",
-                f"{pos} {ema_name}", sent,
-            ))
+            signals.append(
+                _sig(
+                    ema_name,
+                    f"{val:+.2f}%",
+                    f"{pos} {ema_name}",
+                    sent,
+                )
+            )
 
     # ADX + Regime
     adx = latest.get("adx_14")
@@ -554,16 +653,23 @@ def get_signal_summary(ticker: str) -> list[dict]:
     if pd.notna(adx) and pd.notna(regime):
         regime_int = int(regime)
         label_map = {
-            1: "Trending Up", -1: "Trending Down", 0: "Sideways",
+            1: "Trending Up",
+            -1: "Trending Down",
+            0: "Sideways",
         }
         sent_map = {
-            1: "Bullish", -1: "Bearish", 0: "Neutral",
+            1: "Bullish",
+            -1: "Bearish",
+            0: "Neutral",
         }
-        signals.append(_sig(
-            "ADX / Regime", f"{adx:.1f}",
-            f"Regime: {label_map.get(regime_int, 'Unknown')}",
-            sent_map.get(regime_int, "Neutral"),
-        ))
+        signals.append(
+            _sig(
+                "ADX / Regime",
+                f"{adx:.1f}",
+                f"Regime: {label_map.get(regime_int, 'Unknown')}",
+                sent_map.get(regime_int, "Neutral"),
+            )
+        )
 
     # Volume Z-score
     vol_z = latest.get("volume_zscore")
@@ -572,9 +678,14 @@ def get_signal_summary(ticker: str) -> list[dict]:
             interp = "Unusual volume — breakout signal"
         else:
             interp = "Normal volume"
-        signals.append(_sig(
-            "Volume Z-Score", f"{vol_z:.2f}", interp, "Neutral",
-        ))
+        signals.append(
+            _sig(
+                "Volume Z-Score",
+                f"{vol_z:.2f}",
+                interp,
+                "Neutral",
+            )
+        )
 
     # ATR volatility
     atr = latest.get("atr_pct")
@@ -585,10 +696,14 @@ def get_signal_summary(ticker: str) -> list[dict]:
             vol_label = "Low"
         else:
             vol_label = "Normal"
-        signals.append(_sig(
-            "ATR %", f"{atr:.2f}%",
-            f"{vol_label} volatility", "Neutral",
-        ))
+        signals.append(
+            _sig(
+                "ATR %",
+                f"{atr:.2f}%",
+                f"{vol_label} volatility",
+                "Neutral",
+            )
+        )
 
     return signals
 

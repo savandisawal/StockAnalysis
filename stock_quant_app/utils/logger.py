@@ -4,7 +4,7 @@ import sys
 
 from loguru import logger
 
-from app.config import PROJECT_ROOT, settings
+from app.config import settings
 
 # Remove default handler
 logger.remove()
@@ -20,17 +20,28 @@ logger.add(
     colorize=True,
 )
 
-# File output — JSON for structured analysis
-LOG_DIR = PROJECT_ROOT / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# File output — structured JSON lines by default (serialize=True puts
+# logger.bind(...) fields into the "extra" object of each record)
+LOG_DIR = settings.log_dir
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-logger.add(
-    LOG_DIR / "app.log",
-    level="DEBUG",
-    format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{function}:{line} - {message}",
-    rotation="10 MB",
-    retention="30 days",
-    compression="gz",
-)
+if settings.log_json:
+    logger.add(
+        LOG_DIR / "app.jsonl",
+        level="DEBUG",
+        serialize=True,
+        rotation="10 MB",
+        retention="30 days",
+        compression="gz",
+    )
+else:
+    logger.add(
+        LOG_DIR / "app.log",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{function}:{line} - {message}",
+        rotation="10 MB",
+        retention="30 days",
+        compression="gz",
+    )
 
 __all__ = ["logger"]

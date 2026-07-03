@@ -16,10 +16,12 @@ Features:
 
 import numpy as np
 import pandas as pd
+
 from utils.logger import logger
 
 try:
     import pandas_ta as ta
+
     _PANDAS_TA_AVAILABLE = True
 except Exception as _e:  # noqa: BLE001
     ta = None  # type: ignore[assignment]
@@ -46,24 +48,33 @@ def _rsi_fallback(series: pd.Series, length: int = 14) -> pd.Series:
 
 def _atr_fallback(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
     prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
     return tr.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
 
 
 def _adx_fallback(
-    high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14,
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    length: int = 14,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Returns (ADX, +DI, -DI)."""
     prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
 
     up = high - high.shift(1)
     down = low.shift(1) - low
@@ -190,7 +201,8 @@ def add_market_regime(df: pd.DataFrame) -> pd.DataFrame:
     is_bullish = df["ema_50_dist_pct"] > 0
 
     df["regime"] = np.where(
-        is_trending & is_bullish, 1,
+        is_trending & is_bullish,
+        1,
         np.where(is_trending & ~is_bullish, -1, 0),
     )
     return df
@@ -223,14 +235,22 @@ def compute_all_technicals(df: pd.DataFrame) -> pd.DataFrame:
 
 # Column names for all technical features (used by feature_builder)
 TECHNICAL_FEATURES = [
-    "return_1d", "return_5d", "return_20d",
-    "intraday_range_pct", "gap_pct",
+    "return_1d",
+    "return_5d",
+    "return_20d",
+    "intraday_range_pct",
+    "gap_pct",
     "rsi_14",
-    "macd_hist_pct", "macd_signal_diff",
-    "bb_pct_b", "bb_width_pct",
-    "ema_20_dist_pct", "ema_50_dist_pct", "ema_200_dist_pct",
+    "macd_hist_pct",
+    "macd_signal_diff",
+    "bb_pct_b",
+    "bb_width_pct",
+    "ema_20_dist_pct",
+    "ema_50_dist_pct",
+    "ema_200_dist_pct",
     "atr_pct",
-    "adx_14", "di_spread",
+    "adx_14",
+    "di_spread",
     "volume_zscore",
     "regime",
 ]

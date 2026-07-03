@@ -16,6 +16,7 @@ from utils.sectors import get_sector, get_sector_peers
 
 # ── Helper: generate synthetic OHLCV data ───────────────────────
 
+
 def _make_ohlcv(rows: int = 300) -> pd.DataFrame:
     """Generate synthetic OHLCV data for testing (no network needed)."""
     np.random.seed(42)
@@ -25,9 +26,16 @@ def _make_ohlcv(rows: int = 300) -> pd.DataFrame:
     low = close - np.abs(np.random.randn(rows) * 5)
     open_ = close + np.random.randn(rows) * 3
     volume = np.random.randint(1_000_000, 50_000_000, rows)
-    return pd.DataFrame({
-        "Open": open_, "High": high, "Low": low, "Close": close, "Volume": volume,
-    }, index=dates)
+    return pd.DataFrame(
+        {
+            "Open": open_,
+            "High": high,
+            "Low": low,
+            "Close": close,
+            "Volume": volume,
+        },
+        index=dates,
+    )
 
 
 # ── Pillar 1: Technical Feature Tests ────────────────────────────
@@ -116,9 +124,10 @@ class TestFeatureBuilder:
         from features.feature_builder import build_features_for_training
 
         df = build_features_for_training(
-            "RELIANCE", years=1,
+            "RELIANCE",
+            years=1,
             include_fundamentals=False,  # Skip to avoid Screener.in in tests
-            include_macro=False,         # Skip to avoid API calls
+            include_macro=False,  # Skip to avoid API calls
         )
         assert not df.empty
         assert "target" in df.columns
@@ -132,7 +141,8 @@ class TestFeatureBuilder:
         from features.feature_builder import build_features_for_training
 
         df = build_features_for_training(
-            "RELIANCE", years=1,
+            "RELIANCE",
+            years=1,
             include_fundamentals=False,
             include_macro=False,
         )

@@ -10,14 +10,16 @@ Features:
     - macro_mood (aggregate: -1 bearish, 0 neutral, +1 bullish)
 """
 
+import sqlite3
 from dataclasses import dataclass
 
 import anthropic
+import pandas as pd
 
 from app.config import settings
 from data.cache import get_json, set_json
 from data.fetch_corporate import fetch_corporate_announcements
-from data.fetch_macro import MacroSnapshot, fetch_macro_snapshot
+from data.fetch_macro import MacroSnapshot, fetch_macro_history_df, fetch_macro_snapshot
 from data.fetch_news import NewsHeadline, fetch_news_headlines
 from utils.logger import logger
 
@@ -25,6 +27,7 @@ from utils.logger import logger
 @dataclass
 class MacroSentimentFeatures:
     """Processed Pillar 3 features ready for ML model."""
+
     sp500_change: float | None = None
     nasdaq_change: float | None = None
     nifty_change: float | None = None
@@ -32,7 +35,7 @@ class MacroSentimentFeatures:
     usdinr_change: float | None = None
     vix_value: float | None = None
     news_sentiment: float | None = None  # -1 to +1
-    macro_mood: float | None = None      # aggregate score
+    macro_mood: float | None = None  # aggregate score
 
     def to_dict(self) -> dict[str, float | None]:
         return {
@@ -126,7 +129,7 @@ def score_sentiment_claude(
     Returns a score from -1 (very bearish) to +1 (very bullish).
     Returns None if API key is not configured or call fails.
     """
-    if not settings.anthropic_api_key:
+    if not settings.anthropic_api_key.get_secret_value():
         logger.warning("ANTHROPIC_API_KEY not set — skipping sentiment scoring")
         return None
 
@@ -137,7 +140,7 @@ def score_sentiment_claude(
     parts = []
     if headlines:
         headline_text = "\n".join(
-            f"- {h.title} ({h.source})" for h in headlines[:settings.sentiment_max_headlines]
+            f"- {h.title} ({h.source})" for h in headlines[: settings.sentiment_max_headlines]
         )
         parts.append(f"Recent news headlines:\n{headline_text}")
 
@@ -158,7 +161,7 @@ def score_sentiment_claude(
     )
 
     try:
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key.get_secret_value())
         response = client.messages.create(
             model=settings.sentiment_model,
             max_tokens=150,
@@ -167,6 +170,7 @@ def score_sentiment_claude(
 
         # Parse the response
         import json
+
         text = response.content[0].text.strip()
 
         # Handle potential markdown code block wrapping
@@ -243,17 +247,87 @@ def compute_macro_sentiment_features(
 
         if headlines or corporate_summary:
             score = score_sentiment_claude(
-                headlines, sector=sector, corporate_summary=corporate_summary,
+                headlines,
+                sector=sector,
+                corporate_summary=corporate_summary,
             )
             result.news_sentiment = score
             if score is not None:
                 set_json(sentiment_cache_key, {"score": score})
 
     logger.info(
-        f"Macro sentiment: mood={result.macro_mood}, "
-        f"news_sentiment={result.news_sentiment}"
+        f"Macro sentiment: mood={result.macro_mood}, news_sentiment={result.news_sentiment}"
     )
     return result
+
+
+# ── Point-in-time (per-date) feature construction ────────────────
+
+
+def get_sentiment_history(ticker: str | None) -> pd.Series:
+    """Load daily Claude sentiment scores recorded by the scheduler.
+
+    Reads the sentiment_history table in the main DB. Returns an empty
+    series when the table doesn't exist yet (cold start) — historical rows
+    then fall back to neutral 0.0.
+    """
+    if not ticker:
+        return pd.Series(dtype=float)
+    clean = ticker.upper().replace(".NS", "").replace(".BO", "")
+    try:
+        conn = sqlite3.connect(str(settings.db_path), timeout=5)
+        try:
+            rows = conn.execute(
+                "SELECT date, score FROM sentiment_history WHERE ticker = ? ORDER BY date",
+                (clean,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return pd.Series(dtype=float)
+    if not rows:
+        return pd.Series(dtype=float)
+    return pd.Series(
+        {pd.Timestamp(r[0]): float(r[1]) for r in rows if r[1] is not None}, dtype=float
+    ).sort_index()
+
+
+def build_macro_history_features(
+    index: pd.DatetimeIndex,
+    ticker: str | None = None,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Build leakage-free per-date macro/sentiment features aligned to `index`.
+
+    Macro columns come from real historical series (US series pre-lagged by
+    one trading day in fetch_macro_history_df). news_sentiment uses recorded
+    daily scores where available and neutral 0.0 before recording began —
+    never a backfilled guess.
+    """
+    years = max(2, int((index[-1] - index[0]).days / 365.25) + 1)
+    df = pd.DataFrame(index=index, columns=MACRO_SENTIMENT_FEATURES, dtype=float)
+
+    try:
+        macro_hist = fetch_macro_history_df(years=years, use_cache=use_cache)
+    except Exception as e:
+        logger.warning(f"Macro history fetch failed: {e}")
+        macro_hist = pd.DataFrame()
+
+    if not macro_hist.empty:
+        aligned = macro_hist.reindex(macro_hist.index.union(index)).ffill().reindex(index)
+        for col in aligned.columns:
+            if col in df.columns:
+                df[col] = aligned[col]
+        df["macro_mood"] = aligned.apply(lambda row: _compute_macro_mood(row.to_dict()), axis=1)
+
+    sentiment = get_sentiment_history(ticker)
+    if not sentiment.empty:
+        df["news_sentiment"] = (
+            sentiment.reindex(sentiment.index.union(index)).ffill(limit=3).reindex(index)
+        )
+    df["news_sentiment"] = df["news_sentiment"].fillna(0.0)
+
+    return df
 
 
 # Column names for ML model

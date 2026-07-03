@@ -59,12 +59,14 @@ def _fetch_google_news(query: str, max_results: int = 10) -> list[NewsHeadline]:
             except Exception:
                 published = date.today().isoformat()
 
-            headlines.append(NewsHeadline(
-                title=title,
-                source=source,
-                published=published,
-                url=entry.get("link", ""),
-            ))
+            headlines.append(
+                NewsHeadline(
+                    title=title,
+                    source=source,
+                    published=published,
+                    url=entry.get("link", ""),
+                )
+            )
 
         return headlines
 
@@ -107,12 +109,14 @@ def _fetch_moneycontrol_news(
             except Exception:
                 published = date.today().isoformat()
 
-            headlines.append(NewsHeadline(
-                title=title,
-                source="MoneyControl",
-                published=published,
-                url=entry.get("link", ""),
-            ))
+            headlines.append(
+                NewsHeadline(
+                    title=title,
+                    source="MoneyControl",
+                    published=published,
+                    url=entry.get("link", ""),
+                )
+            )
 
         return headlines
 
@@ -185,10 +189,13 @@ def fetch_news_headlines(
 
     # Cache
     if use_cache and result:
-        set_json(cache_key, [
-            {"title": h.title, "source": h.source, "published": h.published, "url": h.url}
-            for h in result
-        ])
+        set_json(
+            cache_key,
+            [
+                {"title": h.title, "source": h.source, "published": h.published, "url": h.url}
+                for h in result
+            ],
+        )
 
     logger.info(f"Fetched {len(result)} unique headlines (stock={stock}, sector={sector})")
     return result

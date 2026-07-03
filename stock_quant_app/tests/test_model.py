@@ -93,7 +93,8 @@ class TestTrainPredict:
 
         # Train with minimal data (technicals only for speed)
         models, features, metrics = train_quantile_models(
-            "RELIANCE", years=2,
+            "RELIANCE",
+            years=2,
             include_fundamentals=False,
             include_macro=False,
         )
@@ -120,7 +121,8 @@ class TestBacktest:
         from model.backtest import run_backtest
 
         metrics = run_backtest(
-            "RELIANCE", years=2,
+            "RELIANCE",
+            years=2,
             min_train_days=200,
             retrain_every=20,
             include_fundamentals=False,
